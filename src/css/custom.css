@@ -1,0 +1,109 @@
+/* -------------------------------------------------------------------------
+ * STRUX FRAMEWORK - PROFESSIONAL THEME
+ * Inspired by Symfony & Modern Dev Tools
+ * ------------------------------------------------------------------------- */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+    /* Core Brand Colors - Indigo/Violet Palette */
+    --ifm-color-primary: #6366f1; /* Indigo 500 */
+    --ifm-color-primary-dark: #4f46e5;
+    --ifm-color-primary-darker: #4338ca;
+    --ifm-color-primary-darkest: #3730a3;
+    --ifm-color-primary-light: #818cf8;
+    --ifm-color-primary-lighter: #a5b4fc;
+    --ifm-color-primary-lightest: #c7d2fe;
+
+    --ifm-code-font-size: 95%;
+    --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+
+    /* Typography */
+    --ifm-font-family-base: 'Inter', system-ui, -apple-system, sans-serif;
+    --ifm-font-family-monospace: 'JetBrains Mono', monospace;
+
+    /* Layout */
+    --ifm-navbar-height: 4rem;
+    --ifm-container-width: 1200px;
+}
+
+/* Dark Mode Overrides */
+[data-theme='dark'] {
+    --ifm-color-primary: #818cf8; /* Lighter indigo for dark mode contrast */
+    --ifm-background-color: #0f172a; /* Slate 900 */
+    --ifm-navbar-background-color: rgba(15, 23, 42, 0.85);
+    --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+/* Navbar - Glassmorphism */
+.navbar {
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(0,0,0,0.05);
+}
+[data-theme='dark'] .navbar {
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+/* Hero Section */
+.hero {
+    padding: 4rem 0;
+    background: radial-gradient(circle at top right, rgba(99, 102, 241, 0.15), transparent 40%),
+    radial-gradient(circle at bottom left, rgba(236, 72, 153, 0.1), transparent 40%);
+    overflow: hidden;
+}
+
+.hero__title {
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    font-size: 3.5rem;
+    background: -webkit-linear-gradient(315deg, var(--ifm-color-primary-dark) 0%, var(--ifm-color-primary-light) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+[data-theme='dark'] .hero__title {
+    background: -webkit-linear-gradient(315deg, #fff 0%, var(--ifm-color-primary-light) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.hero__subtitle {
+    font-size: 1.25rem;
+    color: var(--ifm-color-content-secondary);
+    max-width: 600px;
+    margin: 1.5rem auto;
+    line-height: 1.6;
+}
+
+/* Feature Cards */
+.feature-card {
+    padding: 2rem;
+    border-radius: 1rem;
+    background: var(--ifm-card-background-color);
+    border: 1px solid var(--ifm-color-emphasis-200);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.feature-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 10px 30px -10px rgba(99, 102, 241, 0.3);
+    border-color: var(--ifm-color-primary);
+}
+
+/* Buttons */
+.button--primary {
+    background-color: var(--ifm-color-primary);
+    border-color: var(--ifm-color-primary);
+    font-weight: 600;
+    padding: 0.75rem 2rem;
+    border-radius: 9999px; /* Pill shape */
+    transition: all 0.2s;
+}
+.button--primary:hover {
+    background-color: var(--ifm-color-primary-dark);
+    transform: scale(1.05);
+}
+
+.button--secondary {
+    border-radius: 9999px;
+    padding: 0.75rem 2rem;
+    font-weight: 600;
+}
