@@ -14,7 +14,7 @@ This guide walks you through installing and configuring the **Strux Framework** 
 
 Before installing Strux, ensure your environment meets the following requirements:
 
-- **PHP >= 8.1**
+- **PHP >= 8.4**
 - **Composer** (PHP dependency manager)
 - **PDO PHP Extension** (required for database support)
 - **MBString PHP Extension**

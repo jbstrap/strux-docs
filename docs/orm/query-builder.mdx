@@ -31,6 +31,41 @@ $users = User::query()->where('active', 1)->get();
 > [!NOTE]
 > The query builder is actually the Model itself in a special "query mode." When you call `User::query()`, the ORM returns a fresh Model instance with the `_isQueryBuilderInstance` flag set to `true`. This is why the query builder has access to all the same infrastructure (connection, dialect, etc.).
 
+### The `Builder` Interface (IDE Auto-Completion)
+
+When you pass a closure to methods like `where()`, `join()`, or `batch()`, the closure receives a query builder instance. You can type-hint the `Builder` interface to get full IDE auto-completion for all query builder methods:
+
+```php
+use Strux\Component\Database\ORM\Builder;
+
+// Nested WHERE conditions
+$query->where(function (Builder $q) {
+    $q->where('status', 'active')
+      ->orWhere('priority', 'critical');
+});
+
+// Join with multiple conditions
+$query->join('order_items', function (Builder $join) {
+    $join->on('orders.id', '=', 'order_items.order_id')
+         ->where('order_items.quantity', '>', 0);
+});
+
+// Subquery
+$query->whereIn('user_id', function (Builder $sub) {
+    $sub->select('id')->from('users')->where('active', 1);
+});
+
+// Batch processing
+User::query()->batch(100, function (Builder $q) {
+    $q->where('status', 'pending')->updateMany(['status' => 'processed']);
+});
+```
+
+The `Builder` interface is a **marker interface** — it contains no runtime methods, only `@method` annotations. This means zero overhead at runtime while giving your IDE everything it needs for autocomplete.
+
+> [!TIP]
+> `Model` implements `Builder`, so you can also type-hint `Model $q` in closures. But `Builder` is preferred because it makes the intent clear: "I only need query builder methods here, not full model capabilities."
+
 ---
 
 ## 2. Select Basics
@@ -177,6 +212,55 @@ $query->orWhereRaw('TIMESTAMPDIFF(YEAR, birth_date, CURDATE()) >= 18');
 
 > [!CAUTION]
 > Be careful with `whereRaw()`. It does NOT escape identifiers, only binds parameters. Never pass user input directly into the SQL string itself — always use `?` placeholders.
+
+### Where Json (JSON Column Queries)
+
+Query into JSON columns using the `->` path syntax:
+
+```php
+$query->whereJson('settings->notifications->type', 'email');
+```
+
+The path after `->` maps to standard JSON path syntax. The ORM translates this to each database's native JSON function:
+
+| Database | Generated SQL |
+|----------|--------------|
+| MySQL | `` JSON_UNQUOTE(JSON_EXTRACT(`settings`, '$.notifications.type')) = ? `` |
+| MariaDB | `` JSON_UNQUOTE(JSON_EXTRACT(`settings`, '$.notifications.type')) = ? `` |
+| PostgreSQL | `"settings"#>>'{notifications,type}' = ?` |
+| SQLite | `json_extract("settings", '$.notifications.type') = ?` |
+| SQL Server | `JSON_VALUE([settings], '$.notifications.type') = ?` |
+| Oracle | `JSON_VALUE("settings", '$.notifications.type') = ?` |
+
+#### OR Across JSON Paths
+
+```php
+$query->whereJson('settings->notifications->type', 'email')
+      ->orWhereJson('settings->notifications->type', 'sms');
+-- WHERE JSON_UNQUOTE(JSON_EXTRACT(`settings`, '$.notifications.type')) = 'email'
+--    OR JSON_UNQUOTE(JSON_EXTRACT(`settings`, '$.notifications.type')) = 'sms'
+```
+
+#### JSON IS NULL / IS NOT NULL
+
+```php
+$query->whereJson('settings->theme', 'IS NULL');
+$query->whereJson('settings->theme', 'IS NOT NULL');
+```
+
+#### Other Operators
+
+```php
+$query->whereJson('settings->age', '>', 18);
+$query->whereJson('settings->score', '>=', 100);
+$query->whereJson('settings->name', 'LIKE', '%john%');
+```
+
+> [!NOTE]
+> JSON path expressions inside `->` are delimited by dots. For example, `settings->notifications->type` maps to the JSON path `$.notifications.type`. There is no special escaping for keys containing dots — use `whereRaw()` if you need to query keys with dots in their name.
+
+> [!TIP]
+> JSON column queries are automatically parameterized (the `?` placeholder), just like all other `where()` methods. Values are never concatenated into the SQL string.
 
 ---
 
@@ -642,6 +726,8 @@ SELECT * FROM users WHERE id > 200 ORDER BY id LIMIT 100
 | `orWhereLike($column, $pattern, $caseSensitive)` | OR CASE-sensitive LIKE |
 | `whereNotLike($column, $pattern, $caseSensitive)` | NOT LIKE (case-sensitive) |
 | `orWhereNotLike($column, $pattern, $caseSensitive)` | OR NOT LIKE (case-sensitive) |
+| `whereJson($column, $operator, $value)` | WHERE on a JSON path (use `->` in column) |
+| `orWhereJson($column, $operator, $value)` | OR WHERE on a JSON path |
 
 ### Join Methods
 

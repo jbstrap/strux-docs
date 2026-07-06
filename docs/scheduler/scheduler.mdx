@@ -1,0 +1,1949 @@
+---
+title: Task Scheduling
+sidebar_position: 1
+description: Automate recurring tasks with the attribute-based scheduler.
+---
+
+# Task Scheduling: Automating Your Application
+
+Imagine you run a subscription service. Every night at midnight, you need to:
+
+1. Find all subscriptions that expired today
+2. Send a renewal reminder email to each customer
+3. Deactivate accounts that have been expired for more than 30 days
+4. Generate a daily sales report
+5. Clean up temporary files from the previous day
+
+Doing all of this manually would be impossible. You could have a user trigger an action by visiting a page, but that is unreliable — what if nobody visits the page at midnight? What if the page is visited twice?
+
+**Task Scheduling** solves this by letting you define tasks that run automatically on a schedule, just like a cron job on Linux. But unlike raw cron jobs, the Strux Scheduler is:
+
+- **Attribute-driven** — You annotate your PHP classes with `#[Schedule]` attributes
+- **Self-contained** — No need to edit crontab files on your server
+- **Environment-aware** — Knows about your application's maintenance mode, environment, and dependencies
+- **Observable** — Fires events for every step so you can log, monitor, and react
+- **Production-safe** — Supports mutex locking to prevent overlapping runs, output capture, and graceful shutdown
+
+> [!NOTE]
+> The scheduler is the framework's answer to the question: "How do I make this happen automatically every X minutes/hours/days without relying on a user visiting a page?"
+
+---
+
+## 1. How the Scheduler Works
+
+Before diving into code, it helps to understand the pieces involved and how they fit together.
+
+### The Big Picture
+
+```
+Your Code (Controllers, Services, etc.)
+       |
+       | You define: #[Schedule(frequency: 'daily')] class CleanupJob
+       |
+       v
+ClassFinder (discovers your #[Schedule] attributes)
+       |
+       | Scheduler::discover() scans directories, finds annotated classes
+       |
+       v
+Scheduler (the brain)
+       |
+       | Holds a list of Task objects. Each Task wraps one class + its attributes.
+       |
+       v
+CronParser (the timekeeper)
+       |
+       | Scheduler::runDueTasks() calls CronParser::isDue() for each task
+       | CronParser checks: "Is now the right time to run this?"
+       |
+       v
+TaskRunner (the executor)
+       |
+       | 1. Check RunWhen conditions (should we run?)
+       | 2. Check WithoutOverlapping mutex (is it already running?)
+       | 3. Dispatch TaskStarting event
+       | 4. Instantiate the class and call its method
+       | 5. Dispatch TaskSuccess or TaskFailed event
+       | 6. Release mutex
+       |
+       v
+Your scheduled task does its work
+```
+
+### The Main Components
+
+| Component | What It Does | Analogy |
+|-----------|-------------|---------|
+| **Scheduler** | The central orchestrator. Discovers tasks, decides which are due, and dispatches them to the runner. | The manager who assigns work |
+| **Task** | A simple data object that holds everything about one scheduled task: the class name, method to call, schedule expression, and any constraints (mutex, conditions). | A work order form |
+| **TaskRunner** | The engine that actually executes tasks. Handles conditions, locking, dependency injection, events, and error recovery. | The worker on the factory floor |
+| **CronParser** | Reads cron expressions (`*/5 * * * *`) and named frequencies (`daily`, `hourly`) and tells you if the current time matches. | The clock on the wall |
+| **ScheduleBuilder** | A fluent API for registering tasks without attributes: `$scheduler->call(fn() => ...)->everyMinute()`. | A ticket vending machine |
+
+### What Happens When You Run `schedule:run`
+
+1. The CLI command resolves the `Scheduler` from the container
+2. It calls `$scheduler->discover('/path/to/src')` which scans all PHP files looking for classes with `#[Schedule]`
+3. For each class found, it creates a `Task` object and stores it
+4. It calls `$scheduler->runDueTasks()`
+5. For each task, the CronParser checks if the expression matches the current time
+6. If it is due, the TaskRunner executes it
+7. The command prints "Scheduled tasks executed" and exits
+
+### What Happens When You Run `schedule:work`
+
+Same as above, but in an infinite loop. After running all due tasks, it sleeps until the next minute, then checks again. This runs forever (or until you press Ctrl+C).
+
+> [!TIP]
+> Think of `schedule:run` as checking the schedule once — like looking at your calendar this morning. Think of `schedule:work` as a daemon that continuously checks the calendar every minute — like an alarm clock that never stops watching the time.
+
+---
+
+## 2. Installation & Setup
+
+The scheduler is already bundled with the framework. You just need to ensure it is registered and optionally configure it.
+
+### Automatic Registration
+
+The `SchedulerRegistry` is included in the framework's core registries. It is loaded automatically by the `AppRegistry` during application boot. This means:
+
+- `Scheduler::class` is available in the container as a singleton
+- `TaskRunner::class` is available in the container as a singleton  
+- `CronParser::class` is available in the container as a singleton
+- All dependencies (LoggerInterface, EventDispatcherInterface, Cache) are resolved automatically
+
+You do NOT need to do anything special to register the scheduler. It just works.
+
+### The Config File
+
+The scheduler has a configuration file at `src/Config/Scheduler.php`. This file returns an anonymous class that implements `ConfigInterface`. Here is what it looks like:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Config;
+
+use Strux\Component\Config\ConfigInterface;
+
+return new class implements ConfigInterface {
+    public function toArray(): array
+    {
+        return [
+            'directories' => [
+                // 'vendor/example/module/src',
+            ],
+            'timezone' => env('SCHEDULER_TIMEZONE', 'UTC'),
+            'environments' => [
+                // 'production',
+            ],
+            'skip_in_maintenance' => true,
+        ];
+    }
+};
+```
+
+### Configuration Options Explained
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `directories` | `string[]` | `[]` | Additional directories to scan for `#[Schedule]` classes. The app's own `src/` is always scanned automatically. Use this for packages or shared modules. |
+| `timezone` | `string` | `'UTC'` | The default timezone for evaluating cron expressions. Overridable per-task. |
+| `environments` | `string[]` | `[]` | If non-empty, the scheduler only runs in the listed environments (e.g., `['production']`). Empty means all environments are allowed. |
+| `skip_in_maintenance` | `bool` | `true` | When `true`, all scheduled tasks are skipped if the application is in maintenance mode. |
+
+> [!NOTE]
+> All config values can be accessed via `config('scheduler.timezone')` or `config('scheduler.skip_in_maintenance')` anywhere in your code.
+
+> [!TIP]
+> You can override the timezone at runtime by setting the `SCHEDULER_TIMEZONE` environment variable in your `.env` file:
+> ```ini
+> SCHEDULER_TIMEZONE=America/New_York
+> ```
+
+### Verifying It Works
+
+Run this command to see if the scheduler is set up correctly:
+
+```bash
+php bin/console schedule:run
+```
+
+You should see:
+
+```
+Scheduled tasks executed.
+```
+
+Even if you have no tasks yet, this confirms the scheduler can start, discover tasks (none found), and finish without errors.
+
+> [!TIP]
+> To see more detail about what the scheduler is doing, set your log level to `debug` in your configuration. The scheduler logs every task it considers, runs, or skips.
+
+---
+
+## 3. The `#[Schedule]` Attribute
+
+The `#[Schedule]` attribute is how you mark a class or method as a scheduled task. It is the primary way to define recurring work.
+
+### Where You Can Put It
+
+```php
+use Attribute;
+
+#[Attribute(Attribute::TARGET_CLASS | Attribute::TARGET_METHOD)]
+```
+
+This means you can put `#[Schedule]` on:
+
+- **A class** — The scheduler instantiates the class and calls its `handle()` method
+- **A method** — The scheduler instantiates the containing class and calls the specified method
+
+### Attribute Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `expression` | `?string` | `null` | A raw cron expression like `0 3 * * *` |
+| `frequency` | `?string` | `null` | A named frequency like `daily`, `hourly`, `everyfiveminutes` |
+| `timezone` | `?string` | `null` | A timezone like `America/New_York`. If null, the default from config is used. |
+
+You must provide at least `expression` or `frequency`. If both are null, the task runs every minute (`* * * * *`).
+
+### Class-Level Attribute (The Most Common Pattern)
+
+Putting `#[Schedule]` on a class tells the scheduler to instantiate that class and call its `handle()` method:
+
+```php
+<?php
+
+namespace App\Jobs;
+
+use Strux\Component\Scheduler\Attributes\Schedule;
+
+#[Schedule(frequency: 'daily')]
+class GenerateDailyReport
+{
+    public function handle(): void
+    {
+        // Your task logic here
+        // This runs once every day at midnight
+    }
+}
+```
+
+### Method-Level Attribute
+
+Putting `#[Schedule]` on a method lets you schedule multiple methods within the same class:
+
+```php
+<?php
+
+namespace App\Jobs;
+
+use Strux\Component\Scheduler\Attributes\Schedule;
+
+class Housekeeping
+{
+    #[Schedule(frequency: 'hourly')]
+    public function clearTempFiles(): void
+    {
+        // Runs every hour
+    }
+
+    #[Schedule(frequency: 'daily')]
+    public function rotateLogs(): void
+    {
+        // Runs once per day
+    }
+
+    #[Schedule(frequency: 'weekly')]
+    public function sendSummaryEmail(): void
+    {
+        // Runs once per week
+    }
+}
+```
+
+> [!WARNING]
+> When using method-level attributes, the `handle()` method is NOT called automatically. Each method with its own `#[Schedule]` is called independently. You can also still have a `handle()` method, but it will only run if you give it a `#[Schedule]` attribute too.
+
+> [!TIP]
+> Use class-level attributes when a class represents a single, focused task (one class = one job). Use method-level attributes when you want to group related housekeeping tasks in one class.
+
+---
+
+## 4. Cron Expressions vs Named Frequencies
+
+The scheduler supports two ways to define when a task should run: **cron expressions** and **named frequencies**.
+
+### Named Frequencies (Easier)
+
+Named frequencies are plain-English words that map to common cron expressions. They are perfect for most use cases because you do not need to learn cron syntax.
+
+```php
+#[Schedule(frequency: 'everyminute')]     // Every 60 seconds
+#[Schedule(frequency: 'everyfiveminutes')] // Every 5 minutes
+#[Schedule(frequency: 'hourly')]           // At minute 0 of every hour
+#[Schedule(frequency: 'daily')]            // At midnight (00:00) every day
+#[Schedule(frequency: 'weekly')]           // At midnight on Sunday
+#[Schedule(frequency: 'monthly')]          // At midnight on the 1st of every month
+#[Schedule(frequency: 'yearly')]           // At midnight on January 1st
+```
+
+Here is the complete list of all named frequencies:
+
+| Name | Cron Equivalent | Runs At |
+|------|----------------|---------|
+| `everyminute` | `* * * * *` | Every minute |
+| `everytwominutes` | `*/2 * * * *` | Every 2 minutes |
+| `everythreeminutes` | `*/3 * * * *` | Every 3 minutes |
+| `everyfourminutes` | `*/4 * * * *` | Every 4 minutes |
+| `everyfiveminutes` | `*/5 * * * *` | Every 5 minutes |
+| `everytenminutes` | `*/10 * * * *` | Every 10 minutes |
+| `everyfifteenminutes` | `*/15 * * * *` | Every 15 minutes |
+| `everythirtyminutes` | `0,30 * * * *` | At minute 0 and 30 of every hour |
+| `hourly` | `0 * * * *` | At minute 0 of every hour |
+| `daily` | `0 0 * * *` | At midnight (00:00) |
+| `weekly` | `0 0 * * 0` | At midnight on Sunday |
+| `monthly` | `0 0 1 * *` | At midnight on the 1st of the month |
+| `yearly` | `0 0 1 1 *` | At midnight on January 1st |
+| `annually` | `0 0 1 1 *` | Same as `yearly` |
+| `weekdays` | `* * * * 1-5` | Every minute, Monday through Friday |
+| `weekends` | `* * * * 0,6` | Every minute, Saturday and Sunday |
+
+> [!TIP]
+> When you want a specific time (like "daily at 3 AM"), combine a named frequency with the `at()` method in the fluent API. For attributes, use a raw cron expression instead.
+
+### Cron Expressions (More Powerful)
+
+If you need more control, use a raw cron expression. A cron expression has five fields:
+
+```
+*    *    *    *    *
+|    |    |    |    |
+|    |    |    |    +---- Day of week (0-6, Sunday=0)
+|    |    |    +--------- Month (1-12)
+|    |    +-------------- Day of month (1-31)
+|    +------------------- Hour (0-23)
++------------------------ Minute (0-59)
+```
+
+Each field can be:
+
+| Type | Example | Meaning |
+|------|---------|---------|
+| Wildcard | `*` | Every value (every minute, every hour, etc.) |
+| Exact value | `5` | Only at that specific value |
+| List | `1,3,5` | At any of these values |
+| Range | `1-5` | At any value in this range |
+| Step | `*/15` | Every N values (every 15 minutes) |
+| Combined | `1-30/5` | Every 5 values within a range |
+
+### Common Cron Expression Examples
+
+```php
+#[Schedule(expression: '0 3 * * *')]       // Every day at 3:00 AM
+#[Schedule(expression: '*/15 * * * *')]    // Every 15 minutes
+#[Schedule(expression: '0 9-17 * * *')]    // Every hour from 9 AM to 5 PM
+#[Schedule(expression: '0 0 * * 1')]       // Every Monday at midnight
+#[Schedule(expression: '0 0 1 */3 *')]     // First day of every quarter
+#[Schedule(expression: '30 4 * * 1-5')]    // 4:30 AM on weekdays only
+#[Schedule(expression: '0 0,12 * * *')]    // Midnight and noon every day
+#[Schedule(expression: '*/10 9-17 * * 1-5')] // Every 10 minutes during work hours on weekdays
+```
+
+> [!IMPORTANT]
+> Cron expressions are evaluated in the task's timezone (or the default timezone from config). If your server is in UTC but you want a task to run at 3 AM Eastern Time, set `timezone: 'America/New_York'`.
+
+> [!CAUTION]
+> Cron expressions are validated at discovery time, not at runtime. If you make a typo (like `0 25 * * *` with hour 25), the scheduler will throw an `InvalidArgumentException` immediately when you run `schedule:run` or `schedule:work`. This is a safety feature — it catches mistakes early instead of silently failing at 3 AM.
+
+### Expression vs Frequency: Which Should You Use?
+
+| Use Named Frequencies When | Use Cron Expressions When |
+|---------------------------|--------------------------|
+| You want simple, readable code | You need a specific time of day |
+| "Every 5 minutes" is precise enough | "Daily at 3:30 AM" |
+| You are new to cron syntax | You need complex schedules |
+| The schedule is straightforward | Only weekdays, only business hours |
+
+---
+
+## 5. Creating a Scheduled Task
+
+Let us build a complete scheduled task from scratch.
+
+### Step 1: Create the Class
+
+Create a new PHP file in `src/Domain/General/Job/` (or wherever you keep your jobs). The file name should match the class name.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Domain\General\Job;
+
+use Strux\Component\Scheduler\Attributes\Schedule;
+
+#[Schedule(frequency: 'daily')]
+class CleanupTempFiles
+{
+    public function handle(): void
+    {
+        // Your task logic goes here
+        $tempDir = __DIR__ . '/../../../../storage/temp';
+
+        if (!is_dir($tempDir)) {
+            return;
+        }
+
+        $files = glob($tempDir . '/*');
+        $now = time();
+        $deleted = 0;
+
+        foreach ($files as $file) {
+            if (is_file($file) && ($now - filemtime($file)) > 86400) {
+                unlink($file);
+                $deleted++;
+            }
+        }
+
+        // You can log results
+        echo "Cleaned up {$deleted} temporary files.\n";
+    }
+}
+```
+
+### Step 2: Generate It With the CLI (Alternative)
+
+Instead of writing the file manually, use the `make:scheduled-task` command:
+
+```bash
+php bin/console new:scheduled-task CleanupTempFiles
+```
+
+This creates a file at `src/Domain/General/Job/CleanupTempFiles.php` with a basic template:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Domain\General\Job;
+
+use Strux\Component\Scheduler\Attributes\Schedule;
+use Strux\Component\Scheduler\Attributes\WithoutOverlapping;
+
+#[Schedule(frequency: 'daily')]
+class CleanupTempFiles
+{
+    public function handle(): void
+    {
+        // Task logic here
+    }
+}
+```
+
+### Step 3: Run the Scheduler
+
+```bash
+php bin/console schedule:run
+```
+
+The scheduler scans your `src/` directory, discovers the `#[Schedule]` attribute on your class, and since the frequency is `daily` and it is midnight, the task runs immediately.
+
+If you want to test it without waiting for midnight, temporarily change the frequency to `everyminute`:
+
+```php
+#[Schedule(frequency: 'everyminute')]  // Runs every 60 seconds for testing
+```
+
+> [!WARNING]
+> Do not forget to change `everyminute` back to your intended schedule after testing. Otherwise, your task will run 1,440 times per day!
+
+### Step 4: Verify It Ran
+
+Check the scheduler log output (if you set log level to `debug`, you will see entries like):
+
+```
+[2026-07-06 12:00:00] scheduler.INFO: Running scheduled task: App\Domain\General\Job\CleanupTempFiles
+[2026-07-06 12:00:00] scheduler.INFO: Task App\Domain\General\Job\CleanupTempFiles completed in 142ms, peak memory: 4.2MB
+```
+
+### What the `handle()` Method Receives
+
+The `handle()` method supports automatic dependency injection via the container. Any type-hinted parameter that the container can resolve will be injected automatically:
+
+```php
+use Psr\Log\LoggerInterface;
+use App\Domain\Identity\Service\UserService;
+
+#[Schedule(frequency: 'hourly')]
+class SendNewsletter
+{
+    public function handle(LoggerInterface $logger, UserService $users): void
+    {
+        // $logger is resolved from the container
+        // $users is resolved from the container
+
+        $logger->info('Newsletter job started.');
+        $subscribers = $users->findSubscribers();
+        // ...
+    }
+}
+```
+
+> [!TIP]
+> You do not need to use the container manually. Just declare what you need in the `handle()` method parameters, and the scheduler injects them for you. This keeps your tasks clean, testable, and decoupled from the container.
+
+---
+
+## 6. The Fluent API (Programmatic Tasks)
+
+Attributes are convenient, but sometimes you need to register tasks dynamically — for example, when the schedule depends on configuration, or when you want to schedule a closure without creating a full class.
+
+The **ScheduleBuilder** fluent API lets you register tasks programmatically. You access it through methods on the `Scheduler` instance.
+
+### Three Registration Methods
+
+| Method | What It Schedules | Example |
+|--------|------------------|---------|
+| `$scheduler->call($closure)` | A PHP closure / callable | `$scheduler->call(fn() => cleanup())->hourly()` |
+| `$scheduler->command($name)` | A CLI command string | `$scheduler->command('app:cleanup')->daily()->at('03:00')` |
+| `$scheduler->job($className)` | A class with a `handle()` method | `$scheduler->job(SendReports::class)->weekly()` |
+
+### Scheduling a Closure
+
+The simplest way to schedule something — no class needed:
+
+```php
+use Strux\Component\Scheduler\Scheduler;
+
+class AppServiceProvider
+{
+    public function boot(Scheduler $scheduler): void
+    {
+        $scheduler->call(function () {
+            $diskUsage = disk_free_space('/');
+            $total = disk_total_space('/');
+            $percent = round((1 - $diskUsage / $total) * 100, 2);
+            file_put_contents(
+                __DIR__ . '/../storage/logs/disk_usage.log',
+                date('Y-m-d H:i:s') . " - Disk usage: {$percent}%\n",
+                FILE_APPEND
+            );
+        })->everyTenMinutes()->timezone('UTC');
+    }
+}
+```
+
+### Scheduling a CLI Command
+
+Schedule any registered CLI command:
+
+```php
+$scheduler->command('db:backup')
+    ->daily()
+    ->at('02:00')
+    ->timezone('America/New_York')
+    ->sendOutputTo('/var/log/db-backup.log');
+```
+
+### Scheduling a Job Class
+
+Same as using the `#[Schedule]` attribute, but done in code:
+
+```php
+$scheduler->job(SendDailyReports::class)
+    ->weekdays()
+    ->at('08:00')
+    ->withoutOverlapping(60)
+    ->runInEnvironment('production');
+```
+
+### Fluent Method Reference
+
+Once you call `->call()`, `->command()`, or `->job()`, you get back a `ScheduleBuilder` instance with these methods:
+
+| Method | Description | Example |
+|--------|-------------|---------|
+| `->cron('...')` | Set a raw cron expression | `->cron('0 3 * * *')` |
+| `->everyMinute()` | Run every minute | `->everyMinute()` |
+| `->everyTwoMinutes()` | Every 2 minutes | `->everyTwoMinutes()` |
+| `->everyFiveMinutes()` | Every 5 minutes | `->everyFiveMinutes()` |
+| `->everyTenMinutes()` | Every 10 minutes | `->everyTenMinutes()` |
+| `->everyFifteenMinutes()` | Every 15 minutes | `->everyFifteenMinutes()` |
+| `->everyThirtyMinutes()` | Every 30 minutes | `->everyThirtyMinutes()` |
+| `->hourly()` | Once per hour | `->hourly()` |
+| `->daily()` | Once per day (midnight) | `->daily()` |
+| `->at('13:00')` | Specific time (requires `daily()`) | `->daily()->at('13:00')` |
+| `->weekly()` | Once per week (Sunday midnight) | `->weekly()` |
+| `->monthly()` | Once per month (1st, midnight) | `->monthly()` |
+| `->yearly()` | Once per year (Jan 1, midnight) | `->yearly()` |
+| `->weekdays()` | Monday through Friday | `->weekdays()` |
+| `->weekends()` | Saturday and Sunday | `->weekends()` |
+| `->timezone('...')` | Set timezone for this task | `->timezone('Europe/London')` |
+| `->withoutOverlapping(120)` | Prevent overlapping (minutes) | `->withoutOverlapping(60)` |
+| `->when($callable)` | Run only if condition is true | `->when(fn() => !is_holiday())` |
+| `->sendOutputTo($path, $append)` | Capture output to file | `->sendOutputTo('/tmp/output.log')` |
+| `->appendOutputTo($path)` | Append output to file | `->appendOutputTo('/tmp/output.log')` |
+
+### Example: A Complete Monitoring Setup
+
+```php
+use App\Jobs\GenerateReport;
+use App\Jobs\HealthCheck;
+use Psr\Log\LoggerInterface;
+
+class ScheduleRegistrar
+{
+    public function __construct(
+        private Scheduler $scheduler,
+        private LoggerInterface $logger
+    ) {
+    }
+
+    public function register(): void
+    {
+        // Health check every 5 minutes
+        $this->scheduler->call(function () {
+            $services = ['database', 'cache', 'mailer'];
+            foreach ($services as $service) {
+                // Check each service...
+                $this->logger->info("Health check: {$service} OK");
+            }
+        })->everyFiveMinutes();
+
+        // Daily report at 6 AM
+        $this->scheduler->job(GenerateReport::class)
+            ->daily()
+            ->at('06:00')
+            ->timezone('America/New_York')
+            ->sendOutputTo(storage_path('logs/reports.log'), append: true);
+
+        // Database backup at 2 AM, but only on production
+        $this->scheduler->command('db:backup')
+            ->daily()
+            ->at('02:00')
+            ->withoutOverlapping(120);
+
+        // Clear expired sessions every hour
+        $this->scheduler->call(function () {
+            app('session')->clearExpired();
+            $this->logger->info('Expired sessions cleared.');
+        })->hourly();
+    }
+}
+```
+
+> [!IMPORTANT]
+> The `->at('HH:MM')` method only works when preceded by `->daily()`. It converts the time into a cron expression internally. For example, `->daily()->at('03:30')` becomes `30 3 * * *`.
+
+> [!TIP]
+> You do not have to call `->register()` explicitly. The builder automatically creates and registers the `Task` when you call any terminal method like `->daily()`, `->hourly()`, etc. Wait, actually you DO need to call `->register()`. Let me check the code...
+
+Actually, looking at the ScheduleBuilder implementation, `->register()` is what creates the `Task` and adds it to the scheduler. But the fluent methods return `$this`, so you need to call `->register()` at the end:
+
+```php
+$scheduler->call(fn() => doSomething())
+    ->daily()
+    ->at('03:00')
+    ->register();  // ← Required! Without this, nothing is scheduled.
+```
+
+> [!CAUTION]
+> Do not forget to call `->register()` at the end of your fluent chain. Without it, the task is built but never added to the scheduler. This is a common mistake when first using the fluent API.
+
+---
+
+## 7. Timezones
+
+Timezones are one of the most confusing aspects of scheduling — and one of the most important to get right.
+
+### The Problem
+
+Your server might be in UTC, but your users are in `America/New_York`. If you schedule a task at "midnight" and the server interprets that as UTC, the task will run at 8 PM Eastern Time. Your users will see yesterday's data at midnight their time.
+
+### How the Scheduler Handles Timezones
+
+The scheduler has a three-level timezone resolution:
+
+1. **Global default** — From `config('scheduler.timezone')` (defaults to `'UTC'`)
+2. **Per-task override** — From the `timezone` parameter on `#[Schedule]`
+3. **Per-task override (fluent)** — From `->timezone('...')` on the ScheduleBuilder
+
+### Setting the Global Timezone
+
+In your `src/Config/Scheduler.php`:
+
+```php
+'timezone' => env('SCHEDULER_TIMEZONE', 'America/New_York'),
+```
+
+Or via your `.env` file:
+
+```ini
+SCHEDULER_TIMEZONE=America/New_York
+```
+
+### Setting a Per-Task Timezone
+
+```php
+#[Schedule(frequency: 'daily', timezone: 'Asia/Tokyo')]
+class SendJapaneseNewsletter
+{
+    public function handle(): void
+    {
+        // This runs at midnight Tokyo time, regardless of where the server is
+    }
+}
+```
+
+With the fluent API:
+
+```php
+$scheduler->call(function () {
+    // Tokyo-local logic
+})->daily()->at('09:00')->timezone('Asia/Tokyo')->register();
+```
+
+### What Happens Internally
+
+When `runDueTasks()` evaluates a task:
+
+1. It creates a `DateTimeImmutable('now')` representing the current moment
+2. If the task has a timezone, it converts the DateTime to that timezone with `setTimezone()`
+3. It passes the timezoned DateTime to `CronParser::isDue()`
+4. The parser compares the cron expression against the timezoned time
+
+This means the cron expression is always evaluated in the task's timezone. A `daily` task with `timezone: 'Asia/Tokyo'` will fire at midnight Tokyo time, which is 3 PM UTC (or 11 AM EST, etc.).
+
+> [!NOTE]
+> The timezone conversion only affects when the task fires. The task itself runs on the server and uses the server's timezone unless you explicitly set a timezone inside the task code.
+
+> [!TIP]
+> A good rule of thumb: set your global timezone to match your primary user base. Set per-task timezones for tasks that target specific regions (like a newsletter that should arrive at 9 AM local time in each region).
+
+---
+
+## 8. WithoutOverlapping (Mutex Locking)
+
+### The Problem
+
+Imagine you have a task that sends 10,000 emails. It takes 3 minutes to complete. You scheduled it to run every minute.
+
+Here is what happens without protection:
+
+```
+Minute 0: Task starts (sending batch 1 of 10,000)
+Minute 1: Task is still running, but the scheduler starts a NEW instance
+Minute 2: Now there are 3 instances running simultaneously!
+```
+
+This is called **overlapping**. The same task runs before the previous instance finishes.
+
+### The Solution: WithoutOverlapping
+
+The `#[WithoutOverlapping]` attribute creates a **mutex** (mutual exclusion lock). Before starting a task, the scheduler checks if a lock exists. If it does, the new instance is skipped.
+
+```php
+use Strux\Component\Scheduler\Attributes\Schedule;
+use Strux\Component\Scheduler\Attributes\WithoutOverlapping;
+
+#[Schedule(frequency: 'everyminute')]
+#[WithoutOverlapping(expiresAfter: 30)]
+class SendBulkEmails
+{
+    public function handle(): void
+    {
+        // This task takes about 3 minutes
+        // The mutex prevents a second instance from starting
+    }
+}
+```
+
+### The `expiresAfter` Parameter
+
+`expiresAfter` is the number of **minutes** before the lock expires automatically. Set this to a value slightly longer than your task's expected runtime.
+
+| Scenario | Recommended `expiresAfter` |
+|----------|---------------------------|
+| Quick task (< 1 second) | `1` minute |
+| Moderate task (30 seconds) | `5` minutes |
+| Email sending (2 minutes) | `10` minutes |
+| Report generation (5 minutes) | `15` minutes |
+| Data import (10+ minutes) | `30` minutes |
+| Nightly ETL (1 hour) | `120` minutes |
+
+> [!WARNING]
+> If `expiresAfter` is too short, the lock may expire while the task is still running, allowing a second instance to start. If it is too long, a crashed task will block future runs for that many minutes. Set it to about 2× your expected runtime.
+
+### How the Lock Works
+
+1. When the task starts, the scheduler creates a cache entry: key = `schedule_mutex_<md5 of task ID>`, value = `true`
+2. The entry expires after `expiresAfter` minutes
+3. When the task finishes, the lock is **deleted** from the cache
+4. If another instance tries to start while the lock exists, it is **skipped** with a `TaskSkipped` event
+5. If the task crashes and never finishes, the lock auto-expires after `expiresAfter` minutes
+
+### Where the Lock Is Stored
+
+The mutex uses the application's **Cache** system. By default, this is filesystem-based. If you use multiple servers (load balancing), the default filesystem cache will NOT prevent overlaps across servers — each server has its own lock file.
+
+For multi-server setups, use a shared cache backend like APCu or Redis:
+
+```php
+// config/cache.php
+'default' => 'apcu',  // or 'redis' if available
+```
+
+> [!NOTE]
+> The lock is always released in a `finally` block, which means it is released even if the task throws an exception. The `expiresAfter` is only a safety net for crashes where the PHP process is killed (e.g., `exit()`, segfault, OOM killer).
+
+### Fluent API Equivalent
+
+```php
+$scheduler->job(SendBulkEmails::class)
+    ->everyMinute()
+    ->withoutOverlapping(10)
+    ->register();
+```
+
+---
+
+## 9. RunWhen (Conditional Execution)
+
+Sometimes you want a task to run on a schedule, but only when a certain condition is met. For example:
+
+- "Send the daily report, but only if there are new users"
+- "Clean up temp files, but only if disk usage is above 90%"
+- "Send payment reminders, but only on business days"
+
+### Using the `#[RunWhen]` Attribute
+
+```php
+use Strux\Component\Scheduler\Attributes\Schedule;
+use Strux\Component\Scheduler\Attributes\RunWhen;
+
+#[Schedule(frequency: 'hourly')]
+#[RunWhen(condition: 'App\Service\DiskMonitor@isNearlyFull')]
+class CleanupOldFiles
+{
+    public function handle(): void
+    {
+        // Expensive cleanup — only runs when disk is nearly full
+    }
+}
+```
+
+### Condition Formats
+
+The `condition` parameter accepts three formats:
+
+| Format | Example | How It Works |
+|--------|---------|-------------|
+| **Service@method** | `'App\Service\DiskMonitor@isNearlyFull'` | Resolves the service from the container, calls the method, uses the boolean result |
+| **Closure** | `fn(Config $config) => $config->get('app.cleanup_enabled')` | Calls the closure with injected dependencies |
+| **Callable** | `[$this, 'shouldRun']` | Any callable PHP value |
+
+### Service@Method Format
+
+This is the most common and most reusable format. You define a service with a method that returns `true` or `false`:
+
+```php
+namespace App\Service;
+
+class DiskMonitor
+{
+    public function isNearlyFull(): bool
+    {
+        $free = disk_free_space('/');
+        $total = disk_total_space('/');
+        $usage = 1 - ($free / $total);
+        return $usage > 0.90; // 90% threshold
+    }
+}
+```
+
+Then use it in your scheduled task:
+
+```php
+#[Schedule(frequency: 'hourly')]
+#[RunWhen(condition: 'App\Service\DiskMonitor@isNearlyFull')]
+class CleanupOldFiles
+{
+    public function handle(): void
+    {
+        // Only runs when disk is above 90% usage
+    }
+}
+```
+
+### Closure Format
+
+Use a closure when the condition is simple and does not warrant a separate class:
+
+```php
+#[Schedule(frequency: 'daily')]
+#[RunWhen(condition: fn() => date('N') < 6)] // Only weekdays
+class SendWorkReport
+{
+    public function handle(): void
+    {
+        // Only runs Monday through Friday
+    }
+}
+```
+
+Closures can use dependency injection for type-hinted parameters:
+
+```php
+use App\Domain\Identity\Repository\UserRepository;
+
+#[Schedule(frequency: 'daily')]
+#[RunWhen(condition: fn(UserRepository $users) => $users->countNewSince('yesterday') > 0)]
+class SendNewUserAlert
+{
+    public function handle(): void
+    {
+        // Only runs if there were new users yesterday
+    }
+}
+```
+
+### Multiple Conditions
+
+You can add multiple `#[RunWhen]` attributes. ALL conditions must evaluate to `true` for the task to run (AND logic):
+
+```php
+#[Schedule(frequency: 'everyminute')]
+#[RunWhen(condition: 'App\Service\DiskMonitor@isNearlyFull')]
+#[RunWhen(condition: 'App\Service\ConfigService@isMaintenanceWindow')]
+class EmergencyCleanup
+{
+    public function handle(): void
+    {
+        // Only runs when BOTH conditions are true
+    }
+}
+```
+
+### Fluent API Equivalent
+
+```php
+$scheduler->call(function () {
+    // cleanup logic
+})
+    ->everyTenMinutes()
+    ->when(fn() => disk_free_space('/') < 0.1 * disk_total_space('/'))
+    ->register();
+```
+
+> [!NOTE]
+> `RunWhen` conditions are evaluated on every scheduler tick (every minute in `schedule:work` mode). If the condition is expensive (like a complex database query), consider caching the result or using a simpler check.
+
+> [!TIP]
+> Use `RunWhen` for conditions that change over time (disk usage, day of week, business hours). Use separate `#[Schedule]` attributes with different cron expressions for conditions that are known in advance (like "only on weekdays" can be handled by a cron expression like `0 9 * * 1-5`).
+
+---
+
+## 10. Output Capture (SendOutputTo)
+
+### The Problem
+
+When a task runs, any output it generates (from `echo`, `print`, `var_dump`, etc.) goes to the console. If the task runs via `schedule:work` as a daemon, this output is visible in the terminal. But if the task crashes or the terminal closes, you lose all that output.
+
+### The Solution: SendOutputTo
+
+The `#[SendOutputTo]` attribute captures all output from a task and writes it to a file:
+
+```php
+use Strux\Component\Scheduler\Attributes\Schedule;
+use Strux\Component\Scheduler\Attributes\SendOutputTo;
+
+#[Schedule(frequency: 'daily')]
+#[SendOutputTo(path: '/var/log/daily-report.log', append: true)]
+class GenerateReport
+{
+    public function handle(): void
+    {
+        echo "Starting report generation...\n";
+        echo "Fetching data...\n";
+        // ... do work ...
+        echo "Report complete. 1,234 records processed.\n";
+    }
+}
+```
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `path` | `string` | (required) | Full path to the output file |
+| `append` | `bool` | `false` | If `true`, appends to existing file. If `false`, overwrites each run. |
+
+### Appending vs Overwriting
+
+```php
+// Overwrite each run (only keeps the latest output)
+#[SendOutputTo(path: '/tmp/last-backup.log')]
+
+// Append to existing file (grows over time)
+#[SendOutputTo(path: '/tmp/backup-history.log', append: true)]
+```
+
+> [!WARNING]
+> Append mode (`append: true`) will grow the file indefinitely. For tasks that run frequently, rotate the log file periodically or use a logging library instead of `echo`.
+
+### Fluent API Equivalent
+
+```php
+$scheduler->command('db:backup')
+    ->daily()
+    ->at('02:00')
+    ->sendOutputTo('/var/log/backup.log', append: true)
+    ->register();
+```
+
+The short form `appendOutputTo('/var/log/backup.log')` is equivalent to `sendOutputTo('/var/log/backup.log', append: true)`:
+
+```php
+$scheduler->call(function () {
+    echo "Backup starting...\n";
+})->hourly()->appendOutputTo('/tmp/hourly.log')->register();
+```
+
+### How It Works Internally
+
+1. Before executing the task, the runner calls `ob_start()` to begin output buffering
+2. The task runs normally — all `echo`, `print`, etc. go into the buffer
+3. After the task completes, `ob_get_clean()` retrieves the buffered content
+4. The content is written to the file using `file_put_contents()`
+5. The directory is created automatically if it does not exist
+
+> [!NOTE]
+> Output capture only catches standard output (echo, print, printf). It does NOT catch errors logged via `error_log()`, `trigger_error()`, or the PSR-3 LoggerInterface. For error logging, use the event system (see Events section).
+
+---
+
+## 11. Maintenance Mode
+
+### The Problem
+
+Imagine you are deploying a new version of your application. You put the site in maintenance mode (showing a "Be right back" page). Meanwhile, your scheduler wakes up and tries to run tasks. Some of those tasks might:
+
+- Read from a database that is being migrated
+- Write to a filesystem that is being updated
+- Send emails about incomplete data
+
+This can cause data corruption, errors, or confusing emails to users.
+
+### How the Scheduler Handles This
+
+By default (`skip_in_maintenance: true` in config), the scheduler checks if maintenance mode is active before running any tasks. If it is active, the scheduler logs a message and exits immediately without running any tasks:
+
+```
+Scheduler skipped: application is in maintenance mode.
+```
+
+### Configuration
+
+In your `src/Config/Scheduler.php`:
+
+```php
+'skip_in_maintenance' => true,  // Set to false to run tasks during maintenance
+```
+
+### How Maintenance Mode Is Detected
+
+The scheduler reads `config('maintenance.active')`. This is set by the `Maintenance` config file (`src/Config/Maintenance.php`) and is typically controlled by an environment variable:
+
+```bash
+# Activate maintenance mode
+export MAINTENANCE_MODE=true
+
+# Run the scheduler during maintenance (overrides config)
+php bin/console schedule:run --force
+```
+
+> [!TIP]
+> You do not need to add `--force` — the scheduler does not have such an option. To run tasks during maintenance, set `skip_in_maintenance: false` in the config. But think carefully: do you really want tasks running during a deployment?
+
+> [!WARNING]
+> Do not rely on maintenance mode alone for deployment safety. If your tasks modify data, consider adding a `#[RunWhen]` condition that checks whether the app is in a stable state.
+
+---
+
+## 12. Environment Restrictions
+
+### The Problem
+
+You have three environments: `development`, `staging`, and `production`. You want the "Send payment reminder" task to only run in production. If it accidentally runs in staging, it would send real reminder emails to real customers using staging data.
+
+### The Solution: Environment Filtering
+
+In your `src/Config/Scheduler.php`, set the allowed environments:
+
+```php
+'environments' => [
+    'production',
+],
+```
+
+Now the scheduler only runs tasks when `APP_ENV` is `production`. In development and staging, the scheduler logs a message and skips all tasks:
+
+```
+Scheduler skipped: current environment is not in allowed list.
+```
+
+### Per-Task Environments (via Fluent API)
+
+The config-based restriction applies to ALL tasks. If you need per-task environment control, add a `#[RunWhen]` condition:
+
+```php
+#[Schedule(frequency: 'daily')]
+#[RunWhen(condition: fn() => env('APP_ENV') === 'production')]
+class SendPaymentReminders
+{
+    public function handle(): void
+    {
+        // Only runs in production
+    }
+}
+```
+
+Or use the fluent API:
+
+```php
+$scheduler->job(SendPaymentReminders::class)
+    ->daily()
+    ->when(fn() => env('APP_ENV') === 'production')
+    ->register();
+```
+
+### How Environment Detection Works
+
+The scheduler checks `APP_ENV` from:
+
+1. The `APP_ENV` constant (if defined)
+2. The `APP_ENV` environment variable
+3. Defaults to `'production'`
+
+> [!NOTE]
+> If you leave the `environments` array empty in the config, the scheduler runs in ALL environments with no filtering. This is the default behavior.
+
+> [!TIP]
+> A common setup is: leave `environments` empty in development (run all tasks for testing), then set `['production']` on your production server. Alternatively, use different config files per environment.
+
+---
+
+## 13. CLI Commands
+
+The scheduler provides three CLI commands for managing scheduled tasks.
+
+### `schedule:run` — Run Once
+
+This command runs all due tasks once and exits:
+
+```bash
+php bin/console schedule:run
+```
+
+This is the command you would put in your server's crontab to run every minute:
+
+```bash
+* * * * * cd /path/to/your/app && php bin/console schedule:run >> /dev/null 2>&1
+```
+
+This is the **recommended approach for production**. You add one line to crontab, and the scheduler handles the rest. You can have 100 scheduled tasks, and you only need one crontab entry.
+
+> [!TIP]
+> For production, use `schedule:run` in your crontab (not `schedule:work`). It is simpler, more reliable, and does not require keeping a long-running process alive.
+
+### `schedule:work` — Daemon Mode
+
+This command starts a long-running process that checks for due tasks every minute:
+
+```bash
+php bin/console schedule:work
+```
+
+It runs forever (or until you press Ctrl+C). This is useful for:
+
+- **Development** — You can see tasks running in real time
+- **Docker containers** — Run the scheduler as a service inside a container
+- **Environments where crontab is not available** — Shared hosting, some PaaS platforms
+
+When you press Ctrl+C, the scheduler shuts down gracefully:
+
+```
+Scheduler worker started. Press Ctrl+C to stop.
+^C
+Shutdown signal received. Exiting gracefully after current run...
+Scheduler worker stopped gracefully.
+```
+
+> [!CAUTION]
+> In `schedule:work` mode, the scheduler runs your tasks inside the same PHP process. If a task uses a lot of memory, that memory is not freed until the task completes. Over time, memory fragmentation can occur. For long-running daemon mode, ensure your tasks are memory-efficient or use the queue integration to offload work.
+
+### `new:scheduled-task` — Scaffold a New Task
+
+This command generates a new scheduled task class with a template:
+
+```bash
+php bin/console new:scheduled-task SendWeeklyNewsletter
+```
+
+This creates:
+
+```
+Created: src/Domain/General/Job/SendWeeklyNewsletter.php
+```
+
+The generated file:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Domain\General\Job;
+
+use Strux\Component\Scheduler\Attributes\Schedule;
+use Strux\Component\Scheduler\Attributes\WithoutOverlapping;
+
+#[Schedule(frequency: 'daily')]
+class SendWeeklyNewsletter
+{
+    public function handle(): void
+    {
+        // Task logic here
+    }
+}
+```
+
+---
+
+## 14. Events
+
+The scheduler dispatches events at every stage of a task's lifecycle. You can listen to these events to add logging, monitoring, notifications, or custom behavior.
+
+### The Four Events
+
+| Event | Dispatched When | Data Carried |
+|-------|----------------|-------------|
+| `TaskStarting` | Just before the task executes | The `Task` object |
+| `TaskSuccess` | After the task completes successfully | The `Task` object and the return value |
+| `TaskFailed` | When the task throws an exception | The `Task` object and the `Throwable` exception |
+| `TaskSkipped` | When the task is skipped (condition false or mutex locked) | The `Task` object and a string reason |
+
+### Creating a Listener
+
+First, create a listener class. The listener's `handle()` method receives the event object:
+
+```php
+<?php
+
+namespace App\Domain\General\Listener;
+
+use Strux\Component\Scheduler\Events\TaskFailed;
+use Strux\Component\Scheduler\Events\TaskStarting;
+use Strux\Component\Scheduler\Events\TaskSuccess;
+use Strux\Component\Scheduler\Events\TaskSkipped;
+
+class SchedulerLogger
+{
+    public function handleTaskStarting(TaskStarting $event): void
+    {
+        echo "[SCHEDULER] Starting: " . $event->task->getIdentifier() . "\n";
+    }
+
+    public function handleTaskSuccess(TaskSuccess $event): void
+    {
+        echo "[SCHEDULER] Success: " . $event->task->getIdentifier() . "\n";
+    }
+
+    public function handleTaskFailed(TaskFailed $event): void
+    {
+        echo "[SCHEDULER] FAILED: " . $event->task->getIdentifier()
+            . " - " . $event->exception->getMessage() . "\n";
+    }
+
+    public function handleTaskSkipped(TaskSkipped $event): void
+    {
+        echo "[SCHEDULER] Skipped: " . $event->task->getIdentifier()
+            . " - Reason: " . $event->reason . "\n";
+    }
+}
+```
+
+### Registering the Listener
+
+Create a registry file at `src/Registry/SchedulerListeners.php`:
+
+```php
+<?php
+
+use Strux\Bootstrapping\Registry\ServiceRegistry;
+use Strux\Component\Events\EventDispatcher;
+use Strux\Component\Scheduler\Events\TaskFailed;
+use Strux\Component\Scheduler\Events\TaskSkipped;
+use Strux\Component\Scheduler\Events\TaskStarting;
+use Strux\Component\Scheduler\Events\TaskSuccess;
+
+return new class extends ServiceRegistry {
+    public function build(): void
+    {
+        // No services to register
+    }
+
+    public function init($app): void
+    {
+        /** @var EventDispatcher $events */
+        $events = $this->container->get(EventDispatcher::class);
+
+        $listener = new \App\Domain\General\Listener\SchedulerLogger();
+
+        $events->addListener(TaskStarting::class, [$listener, 'handleTaskStarting']);
+        $events->addListener(TaskSuccess::class, [$listener, 'handleTaskSuccess']);
+        $events->addListener(TaskFailed::class, [$listener, 'handleTaskFailed']);
+        $events->addListener(TaskSkipped::class, [$listener, 'handleTaskSkipped']);
+    }
+};
+```
+
+Or use the framework's auto-discovery: create a listener class in the `listeners` directory and give it a `handle()` method with the event type-hint:
+
+```php
+<?php
+
+namespace App\Domain\General\Listener;
+
+use Strux\Component\Scheduler\Events\TaskFailed;
+
+class TaskFailedListener
+{
+    public function handle(TaskFailed $event): void
+    {
+        // Send an alert when a task fails
+        $message = "Task {$event->task->getIdentifier()} failed: "
+            . $event->exception->getMessage();
+
+        // Send email, Slack notification, etc.
+        error_log($message);
+    }
+}
+```
+
+### What You Can Do With Events
+
+| Event | Typical Use Cases |
+|-------|------------------|
+| `TaskStarting` | Log the start time, increment a metric counter, check if a precondition is met |
+| `TaskSuccess` | Log duration, record last-success timestamp, send summary notifications |
+| `TaskFailed` | Send alerts (email, Slack, PagerDuty), increment error counter, attempt automatic recovery |
+| `TaskSkipped` | Log why it was skipped, detect if a task is constantly being skipped (mutex stuck?) |
+
+> [!NOTE]
+> The events are dispatched by the `TaskRunner` using the framework's `EventDispatcher`, which follows the PSR-14 standard. You can use any PSR-14 compatible listener.
+
+> [!TIP]
+> Write a `TaskFailed` listener early in development. It is the most important one — it alerts you when something goes wrong. Without it, a silently failing task could go unnoticed for days.
+
+---
+
+## 15. Queue Integration
+
+### The Problem
+
+Some tasks take a long time to run — sending 10,000 emails, generating a complex PDF, processing a video upload. If such a task runs inside the scheduler process, it blocks the scheduler from checking other tasks. In `schedule:work` mode, the entire scheduler is blocked until the long task finishes.
+
+### The Solution: ShouldQueue
+
+If your scheduled task class implements the `ShouldQueue` interface and a queue driver is configured, the task is pushed to the queue instead of running synchronously. The scheduler returns immediately, and the queue worker processes the task in the background.
+
+```php
+<?php
+
+namespace App\Domain\General\Job;
+
+use Strux\Component\Queue\ShouldQueue;
+use Strux\Component\Scheduler\Attributes\Schedule;
+
+#[Schedule(frequency: 'hourly')]
+class SendBulkNotifications implements ShouldQueue
+{
+    public function handle(): void
+    {
+        // This runs inside a queue worker, not inside the scheduler
+        // The scheduler returns immediately after pushing to the queue
+    }
+}
+```
+
+### How It Works
+
+1. The scheduler checks if the task is due (yes, it is hourly)
+2. The TaskRunner creates an instance of `SendBulkNotifications`
+3. It checks: does this instance implement `ShouldQueue`? Is a queue driver available?
+4. If both are true, it calls `$this->queue->push($instance)` instead of `$instance->handle()`
+5. The queue worker picks up the job and calls `handle()` in a separate process
+6. The scheduler immediately moves on to check the next task
+
+### Configuration
+
+You need a working queue system. By default, the queue uses the `database` driver:
+
+```bash
+# Initialize the queue table
+php bin/console queue:init
+
+# Start a queue worker (in a separate terminal)
+php bin/console queue:work
+```
+
+Without a configured queue driver, the `ShouldQueue` interface is ignored and the task runs synchronously.
+
+> [!TIP]
+> Use `ShouldQueue` for any task that takes more than a few seconds. This keeps the scheduler responsive and allows the task to run in parallel with other tasks.
+
+> [!WARNING]
+> Tasks that implement `ShouldQueue` run in the queue worker's process, not the scheduler's. This means:
+> - Dependency injection still works (the queue worker resolves dependencies)
+> - The task's `#[Schedule]` and `#[RunWhen]` attributes are evaluated by the scheduler, not the queue
+> - The task's `#[WithoutOverlapping]` applies to the scheduler, not the queue worker
+
+---
+
+## 16. Logging & Monitoring
+
+The scheduler provides built-in logging for every task execution. Here is what gets logged and at what level:
+
+| Log Level | Message | When |
+|-----------|---------|------|
+| `info` | `Running scheduled task: App\Jobs\Cleanup` | Before each task runs |
+| `info` | `Task App\Jobs\Cleanup completed in 142ms, peak memory: 4.2MB` | After successful completion |
+| `info` | `Task App\Jobs\Cleanup skipped. Mutex lock exists.` | When WithoutOverlapping blocks a task |
+| `debug` | `Task App\Jobs\Cleanup skipped by RunWhen condition.` | When a RunWhen condition returns false |
+| `error` | `Task App\Jobs\Cleanup failed after 1,234ms: ...` | When a task throws an exception |
+| `error` | `Scheduler error for task App\Jobs\Cleanup: ...` | When an error occurs outside the task runner |
+| `info` | `Scheduler skipped: application is in maintenance mode.` | When maintenance mode is active |
+| `info` | `Scheduler skipped: current environment is not in allowed list.` | When the environment is restricted |
+
+### Duration and Memory
+
+Every successful task execution logs:
+
+- **Duration** in milliseconds — so you can track if a task is getting slower over time
+- **Peak memory** in megabytes — so you can detect memory leaks
+
+Example log line:
+
+```
+Task App\Jobs\GenerateReport completed in 3,452ms, peak memory: 28.1MB
+```
+
+### Using a TaskFailed Listener for Monitoring
+
+For production monitoring, set up a listener that notifies you when tasks fail:
+
+```php
+use Strux\Component\Scheduler\Events\TaskFailed;
+
+class TaskFailureAlert
+{
+    public function handle(TaskFailed $event): void
+    {
+        $taskId = $event->task->getIdentifier();
+        $error = $event->exception->getMessage();
+
+        // Log to a monitoring service
+        // Send to Slack
+        // Send an email
+        // Increment a metric in Prometheus/StatsD
+
+        error_log("CRITICAL: Scheduled task '{$taskId}' failed: {$error}");
+    }
+}
+```
+
+> [!TIP]
+> Set up a `TaskFailed` listener on the first day of your project, not the day something breaks. A failing task that nobody notices is worse than no task at all.
+
+---
+
+## 17. Cron Expression Reference
+
+This section is your complete reference for cron expressions supported by the scheduler.
+
+### The Five Fields
+
+```
+ .---------------- minute (0-59)
+ |  .------------- hour (0-23)
+ |  |  .---------- day of month (1-31)
+ |  |  |  .------- month (1-12)
+ |  |  |  |  .---- day of week (0-6, Sunday=0)
+ |  |  |  |  |
+ *  *  *  *  *
+```
+
+### Special Characters
+
+| Character | Name | Meaning | Example |
+|-----------|------|---------|---------|
+| `*` | Asterisk | Any value | `* * * * *` = every minute |
+| `,` | Comma | List of values | `1,3,5 * * * *` = at minutes 1, 3, 5 |
+| `-` | Hyphen | Range of values | `9-17 * * * *` = every hour from 9 AM to 5 PM |
+| `/` | Slash | Step values | `*/15 * * * *` = every 15 minutes |
+
+### Examples by Category
+
+#### Every N Minutes
+
+```
+* * * * *       Every minute (or use frequency: 'everyminute')
+*/2 * * * *     Every 2 minutes
+*/5 * * * *     Every 5 minutes
+*/10 * * * *    Every 10 minutes
+*/15 * * * *    Every 15 minutes
+*/30 * * * *    Every 30 minutes
+```
+
+#### Specific Times
+
+```
+0 * * * *       Every hour at minute 0 (or frequency: 'hourly')
+0 0 * * *       Midnight every day (or frequency: 'daily')
+0 9 * * *       9 AM every day
+30 16 * * *     4:30 PM every day
+0 0,12 * * *    Midnight and noon every day
+*/30 9-17 * * * Every 30 minutes during business hours
+```
+
+#### Specific Days
+
+```
+0 0 * * 0       Midnight on Sunday (or frequency: 'weekly')
+0 0 * * 1       Midnight on Monday
+0 0 * * 1-5     Midnight on weekdays (Monday-Friday)
+0 0 * * 0,6     Midnight on weekends (Saturday, Sunday)
+0 9 * * 1       Monday at 9 AM
+```
+
+#### Specific Months
+
+```
+0 0 1 * *       Midnight on the 1st of every month (or frequency: 'monthly')
+0 0 1 1 *       Midnight on January 1st (or frequency: 'yearly')
+0 0 1 */3 *     Midnight on the 1st of every quarter
+0 0 1 4,10 *    Midnight on April 1st and October 1st
+```
+
+#### Complex Examples
+
+```
+0 0 1 * 0       Midnight on the 1st AND every Sunday
+0 0 29 2 *      Midnight on February 29th (only on leap years)
+*/5 9-17 * * 1-5    Every 5 minutes, 9 AM-5 PM, Monday-Friday
+0 0 * * 1,3,5       Midnight on Monday, Wednesday, Friday
+```
+
+### Named Frequency vs Cron Expression Quick Reference
+
+| You Want | Named Frequency | Cron Expression |
+|----------|----------------|-----------------|
+| Every minute | `everyminute` | `* * * * *` |
+| Every 5 minutes | `everyfiveminutes` | `*/5 * * * *` |
+| Every hour | `hourly` | `0 * * * *` |
+| Every day at midnight | `daily` | `0 0 * * *` |
+| Every day at 3 AM | — | `0 3 * * *` |
+| Every day at 3:30 PM | — | `30 15 * * *` |
+| Every Sunday at midnight | `weekly` | `0 0 * * 0` |
+| Every Monday at 9 AM | — | `0 9 * * 1` |
+| Weekdays only | `weekdays` | `* * * * 1-5` |
+| Weekends only | `weekends` | `* * * * 0,6` |
+| Once per month | `monthly` | `0 0 1 * *` |
+| Once per year | `yearly` | `0 0 1 1 *` |
+
+> [!NOTE]
+> Some named frequencies like `weekdays` and `weekends` use `* * * * 1-5` — this means "every minute, but only on weekdays." If you want "daily at midnight but only on weekdays," combine `daily` with a `RunWhen` condition, or use `0 0 * * 1-5`.
+
+---
+
+## 18. Best Practices
+
+### General
+
+**Use `schedule:run` in production, `schedule:work` in development.**
+
+Adding `* * * * * php /path/to/app/bin/console schedule:run` to your server's crontab is the most reliable way to run the scheduler in production. It is simpler than keeping a daemon alive, requires no process manager, and automatically recovers from crashes.
+
+**Set up a TaskFailed listener on day one.**
+
+A silently failing task can cause data corruption, missed deadlines, or angry customers. A simple listener that sends an email or Slack message when a task fails is invaluable.
+
+**Use `WithoutOverlapping` for any task that might run longer than its interval.**
+
+If you are not sure how long a task will take, add `#[WithoutOverlapping]` with a generous `expiresAfter`. It is better to skip one run than to have two instances corrupting data.
+
+**Log task output instead of relying on echo.**
+
+Use the `#[SendOutputTo]` attribute or a proper PSR-3 logger in your task. Output that only goes to the terminal is lost when the terminal closes.
+
+**Validate your cron expressions.**
+
+The scheduler validates cron expressions at discovery time, but it is still possible to create a valid expression that does not mean what you think. Double-check your expressions with the reference table.
+
+### Task Design
+
+**Keep tasks focused on one thing.**
+
+A scheduled task should do one job and do it well. If you need to clean up files AND send reports, create two separate tasks. They can share the same schedule or have different ones.
+
+**Make tasks idempotent.**
+
+An idempotent task produces the same result whether you run it once or a hundred times. For example, "set all expired subscriptions to inactive" is idempotent — running it twice does no harm. "Charge all active subscriptions $10" is NOT idempotent — running it twice charges customers twice.
+
+**Handle errors gracefully.**
+
+Your task's `handle()` method should catch expected exceptions and log them. Only let unexpected exceptions bubble up to the scheduler (which logs them and dispatches `TaskFailed`).
+
+```php
+public function handle(): void
+{
+    try {
+        $this->processPayments();
+    } catch (PaymentGatewayException $e) {
+        // Expected: payment gateway temporarily unavailable
+        $this->logger->warning('Payment processing failed, will retry next cycle: ' . $e->getMessage());
+    }
+    // Unexpected exceptions (like database connection errors) will bubble up
+}
+```
+
+**Do not schedule tasks that depend on each other.**
+
+If Task B must run after Task A, the scheduler cannot guarantee this. Tasks may run in any order, or Task A may be skipped due to overlapping while Task B runs anyway. If you need sequential execution, make Task A call Task B when it finishes.
+
+### Performance
+
+**Use `ShouldQueue` for long-running tasks.**
+
+Tasks that take more than a few seconds should be queued. This keeps the scheduler responsive and allows the task to run in a separate process.
+
+**Set `expiresAfter` to about 2× the expected runtime.**
+
+Too short: the mutex expires while the task is still running, allowing a second instance. Too long: if the task crashes, it blocks future runs for longer than necessary.
+
+**Do not put heavy database queries in `RunWhen` conditions.**
+
+`RunWhen` conditions are evaluated every minute in `schedule:work` mode or every time `schedule:run` is called. An expensive condition (like `SELECT COUNT(*) FROM large_table`) will run every minute. Cache it or use a simpler check.
+
+**Monitor task duration and memory.**
+
+The scheduler logs duration and peak memory for every task. Watch these metrics. A task that is taking longer every day may need optimization. A task with growing memory usage may have a leak.
+
+### Testing
+
+**Test with `everyminute` first.**
+
+Change your schedule to `everyminute` during development so you do not have to wait for the right time to test. Just remember to change it back before deploying.
+
+**Use `schedule:run` for one-off testing.**
+
+Instead of waiting for the scheduler to detect the task is due, you can manually trigger it:
+
+```bash
+php bin/console schedule:run
+```
+
+If the task's cron expression matches the current time, it runs. To force a task to run regardless of schedule, temporarily set it to `everyminute`.
+
+**Test the `handle()` method directly.**
+
+You can instantiate your task class and call `handle()` in a unit test or artisan tinker, just like any other PHP class:
+
+```php
+$task = new App\Jobs\CleanupTempFiles();
+$task->handle(); // Runs immediately, no scheduler needed
+```
+
+---
+
+## 19. Troubleshooting
+
+### "Scheduled tasks executed." but nothing happened
+
+Check the log level. Set it to `debug` to see which tasks were considered and why they were skipped.
+
+```
+config('app.log_level', 'debug');
+```
+
+Then look for log entries:
+
+- `Task X skipped by RunWhen condition.` — A condition returned false
+- `Task X skipped. Mutex lock exists.` — WithoutOverlapping blocked it
+- No log entry at all — The cron expression might not match the current time
+
+### My task never runs
+
+Three most common causes:
+
+1. **Wrong cron expression** — `daily` runs at midnight (00:00). If it is 3 PM, the task will not run until midnight. Use `everyminute` for testing.
+
+2. **Maintenance mode** — Check if `MAINTENANCE_MODE` is set to `true`. Check `config('maintenance.active')`.
+
+3. **Environment restriction** — If `environments` is set to `['production']` but you are in `development`, the scheduler skips all tasks. Check `app_env` (the framework reads `APP_ENV`).
+
+### "Mutex lock exists" even though the task finished
+
+The mutex lock has a TTL (`expiresAfter`). If the task took longer than `expiresAfter` minutes, the lock expired, a second instance started, and now BOTH instances have their own locks. Wait for the first instance to finish and the lock to be deleted, or increase `expiresAfter`.
+
+If the task crashed and the lock was not released, wait for `expiresAfter` minutes for the lock to auto-expire. Then increase `expiresAfter` to be more generous.
+
+### Invalid cron expression error
+
+The scheduler validates cron expressions when you run `schedule:run`. If you get:
+
+```
+Invalid cron expression '0 25 * * *': value 25 out of range [0, 23] for field 1
+```
+
+The hour `25` is invalid (hours go from 0 to 23). Fix the expression:
+
+```php
+#[Schedule(expression: '0 3 * * *')]  // Correct: 3 AM
+```
+
+### "Method handle does not exist on XYZ"
+
+Your scheduled class is missing a `handle()` method. Add one:
+
+```php
+public function handle(): void
+{
+    // Your task logic
+}
+```
+
+Or if you are using method-level attributes, check that the method name matches:
+
+```php
+class MyClass
+{
+    #[Schedule(frequency: 'everyminute')]
+    public function myCustomMethod(): void  // ← Must match exactly
+    {
+    }
+}
+```
+
+### Memory grows over time in `schedule:work`
+
+In daemon mode, the PHP process runs indefinitely. If a task loads large datasets, memory may not be fully reclaimed. Solutions:
+
+1. Use `ShouldQueue` to offload heavy tasks to a separate worker process
+2. Call `gc_collect_cycles()` at the end of memory-intensive tasks
+3. Restart the worker periodically (most process managers can do this)
+4. Use `schedule:run` via crontab instead of `schedule:work`
+
+### "Call to undefined method ScheduleBuilder::register()"
+
+Make sure you imported the correct class:
+
+```php
+use Strux\Component\Scheduler\ScheduleBuilder;
+```
+
+If calling `register()` directly on a ScheduleBuilder instance, ensure the method is accessible. The method is `public`, so this should work:
+
+```php
+$builder = $scheduler->call(fn() => ...)->everyMinute();
+$task = $builder->register(); // Should work
+```
+
+If you are getting the error inside a chain, confirm you are not missing parentheses:
+
+```php
+// Wrong: missing () on register
+$scheduler->call(fn() => ...)->everyMinute()->register;
+
+// Correct:
+$scheduler->call(fn() => ...)->everyMinute()->register();
+```
+
+### The scheduler does not discover my task class
+
+Ensure your class is in a directory that is scanned. By default, the scheduler scans `src/`. If your task is in a different directory (e.g., a package), add it to the `directories` array in the scheduler config:
+
+```php
+'directories' => [
+    'vendor/my-package/src',
+],
+```
+
+Also ensure your class:
+- Is not `abstract`
+- Has the `#[Schedule]` attribute (class-level or method-level)
+- Is autoloadable (PSR-4)
+
+### Multiple servers and WithoutOverlapping
+
+If you run the scheduler on multiple servers (load-balanced environment), the `WithoutOverlapping` mutex uses the local cache. Server A does not know that Server B is running the task. Both servers run it simultaneously.
+
+To prevent this, either:
+
+1. Run the scheduler on only ONE server
+2. Use a shared cache backend (Redis, APCu, database)
+3. Accept that the task may run multiple times and make it idempotent
+
+> [!TIP]
+> The simplest solution for multi-server environments: run the scheduler on only one server. Use a load balancer to route web traffic to all servers, but let only one server run the cron. This is the standard approach used by most applications.
+
+---
+
+## 20. Quick Reference Card
+
+### Attributes
+
+| Attribute | Where It Goes | What It Does |
+|-----------|--------------|--------------|
+| `#[Schedule]` | Class or method | Defines the schedule (frequency or cron expression) |
+| `#[WithoutOverlapping]` | Class or method | Prevents the task from running if the previous instance is still running |
+| `#[RunWhen]` | Class or method | Adds a condition that must be true for the task to run |
+| `#[SendOutputTo]` | Class or method | Captures output and writes it to a file |
+
+### CLI Commands
+
+| Command | Purpose |
+|---------|---------|
+| `schedule:run` | Run all due tasks once (use in crontab) |
+| `schedule:work` | Start the scheduler daemon (runs forever) |
+| `new:scheduled-task <Name>` | Generate a new task class |
+
+### Events
+
+| Event Namespace | Dispatched |
+|----------------|-----------|
+| `Strux\Component\Scheduler\Events\TaskStarting` | Before execution |
+| `Strux\Component\Scheduler\Events\TaskSuccess` | After successful execution |
+| `Strux\Component\Scheduler\Events\TaskFailed` | When an exception is thrown |
+| `Strux\Component\Scheduler\Events\TaskSkipped` | When the task is skipped |
+
+### Config File
+
+`src/Config/Scheduler.php` — loaded as `config('scheduler.*')`
+
+### Key Classes
+
+| Class | Namespace |
+|-------|-----------|
+| `Scheduler` | `Strux\Component\Scheduler\Scheduler` |
+| `Task` | `Strux\Component\Scheduler\Task` |
+| `TaskRunner` | `Strux\Component\Scheduler\TaskRunner` |
+| `CronParser` | `Strux\Component\Scheduler\CronParser` |
+| `ScheduleBuilder` | `Strux\Component\Scheduler\ScheduleBuilder` |
+
+---
+
+## 21. Complete Example
+
+Here is a complete, real-world example combining everything you have learned.
+
+### The Task: Nightly Database Maintenance
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Domain\General\Job;
+
+use PDO;
+use Psr\Log\LoggerInterface;
+use Strux\Component\Scheduler\Attributes\RunWhen;
+use Strux\Component\Scheduler\Attributes\Schedule;
+use Strux\Component\Scheduler\Attributes\SendOutputTo;
+use Strux\Component\Scheduler\Attributes\WithoutOverlapping;
+
+#[Schedule(frequency: 'daily', timezone: 'America/New_York')]
+#[WithoutOverlapping(expiresAfter: 30)]
+#[RunWhen(condition: 'App\Service\MaintenanceWindow@isAllowed')]
+#[SendOutputTo(path: '/var/log/db-maintenance.log', append: true)]
+class DatabaseNightlyMaintenance
+{
+    public function __construct(
+        private PDO $pdo,
+        private LoggerInterface $logger
+    ) {
+    }
+
+    public function handle(): void
+    {
+        $this->logger->info('Starting nightly database maintenance.');
+        echo "[" . date('Y-m-d H:i:s') . "] Maintenance started.\n";
+
+        // Step 1: Optimize tables
+        echo "Optimizing tables...\n";
+        $this->pdo->exec('OPTIMIZE TABLE users, sessions, logs');
+
+        // Step 2: Clean up expired sessions
+        echo "Cleaning expired sessions...\n";
+        $stmt = $this->pdo->prepare('DELETE FROM sessions WHERE expires_at < NOW()');
+        $stmt->execute();
+        echo "Removed {$stmt->rowCount()} expired sessions.\n";
+
+        // Step 3: Archive old log entries
+        echo "Archiving logs older than 30 days...\n";
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO logs_archive SELECT * FROM logs WHERE created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)'
+        );
+        $stmt->execute();
+        $stmt = $this->pdo->prepare('DELETE FROM logs WHERE created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)');
+        $stmt->execute();
+        echo "Archived and removed {$stmt->rowCount()} log entries.\n";
+
+        echo "[" . date('Y-m-d H:i:s') . "] Maintenance complete.\n";
+        $this->logger->info('Nightly database maintenance completed successfully.');
+    }
+}
+```
+
+### Registering Additional Tasks via Fluent API
+
+```php
+// In a service provider or bootstrapper
+$scheduler->call(function (LoggerInterface $log) {
+    $free = disk_free_space('/');
+    $total = disk_total_space('/');
+    $pct = round((1 - $free / $total) * 100, 1);
+    $log->info("Disk usage: {$pct}%");
+})
+    ->hourly()
+    ->timezone('UTC')
+    ->register();
+
+$scheduler->command('db:backup')
+    ->daily()
+    ->at('02:30')
+    ->withoutOverlapping(120)
+    ->sendOutputTo('/var/backups/db.log', append: true)
+    ->register();
+```
+
+### Running It
+
+```bash
+# One-time run (for testing)
+php bin/console schedule:run
+
+# In production, add to crontab:
+# * * * * * cd /var/www/myapp && php bin/console schedule:run >> /dev/null
+```
+
+> [!TIP]
+> And that is it. You now have a fully automated, production-grade task scheduling system. No more manual cron job management, no more missed runs, no more overlapping tasks. Just clean PHP attributes and a single line in your crontab.

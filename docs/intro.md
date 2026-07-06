@@ -4,49 +4,44 @@ description: Welcome to the Strux Framework documentation.
 sidebar_position: 1
 ---
 
-import Tabs from '@theme/Tabs';
-import TabItem from '@theme/TabItem';
-
 # Strux Framework
 
-**A lightweight, attribute-based PHP framework for modern web development.**
+**A lightweight, attribute-driven PHP framework for modern web development.**
 
-Strux abstracts complex backend tasks into **clean, object-oriented interfaces** while staying fast, minimal, and developer-friendly.  
-Built for PHP 8.1+, it embraces modern language features without unnecessary overhead.
-
----
-
-## ✨ Why Strux?
-
-:::info Designed for clarity
-Strux focuses on **developer ergonomics**, **explicit configuration**, and **modern PHP patterns** — without sacrificing performance.
-:::
-
-- 🧭 **Attribute-Based Routing**  
-  Define routes directly inside your controllers using PHP attributes.
-
-- 🧩 **Smart Forms**  
-  Object-oriented form creation, handling, and submission.
-
-- ✅ **Validation System**  
-  Powerful, rule-based validation with clear error handling.
-
-- 🗄 **Lightweight ORM**  
-  Simple, expressive database interactions without heavy abstractions.
+Strux abstracts complex backend tasks into **clean, object-oriented interfaces** while staying fast, minimal, and developer-friendly.
+Built for PHP 8.4+, it embraces modern language features without unnecessary overhead.
 
 ---
 
-## 🚀 Get Started in Minutes
+## Why Strux?
 
-:::tip Prerequisites
-You’ll need **PHP 8.1+** and **Composer** installed.
-:::
+> [!INFO]
+> Strux focuses on **developer ergonomics**, **explicit configuration**, and **modern PHP patterns** — without sacrificing performance.
+
+**Attribute-Based Routing** — Define routes directly inside your controllers using PHP attributes (`#[Route]`, `#[RouteGroup]`).
+
+**Active Record ORM** — Lightweight, expressive models with attribute-defined schemas, relationships (`#[OwnedBy]`, `#[OwnedByMany]`), JSON queries, and caching.
+
+**Smart Forms** — Object-oriented, attribute-driven form creation with auto-binding to requests, models, or arrays; built-in validation and rendering.
+
+**Attribute-Driven Auth** — Sentinels, policies, permissions, roles, email verification, and password recovery — all configured through PHP attributes.
+
+**Multi-Database Support** — MySQL, MariaDB, PostgreSQL, SQLite, SQL Server, and Oracle with a unified query builder that handles dialect differences automatically.
+
+**Built-in Services** — Validation (`#[Validate]`), model lifecycle events, middleware, mailer, migrations, CLI commands, and session management.
+
+---
+
+## Get Started in Minutes
+
+> [!TIP]
+> You will need **PHP 8.1+** and **Composer** installed.
 
 ### Create a New Project
 
 ```bash
 composer create-project strux/strux-app my-new-app
-````
+```
 
 ### Run the Development Server
 
@@ -61,52 +56,41 @@ Open your browser and visit:
 http://localhost:8000
 ```
 
-🎉 Your Strux application is now running.
+Your Strux application is now running.
 
 ---
 
-## 🧠 How Strux Works
+## How Strux Works
 
-Strux encourages a **clean, explicit architecture**:
+Strux follows a **convention-over-configuration** approach with zero boilerplate:
 
-* Controllers define routes and actions
-* Attributes configure behavior
-* Services are injected automatically
-* ORM handles persistence with minimal boilerplate
-
-Everything stays **close to your code**, not hidden in config files.
-
----
-
-## 📚 What’s Next?
-
-<div className="row">
-  <div className="col col--4">
-    ### Controllers  
-    Learn how to handle requests and responses using attribute-based routing.
-  </div>
-
-  <div className="col col--4">
-    ### Routing  
-    Explore typed parameters, named routes, prefixes, and redirects.
-  </div>
-
-  <div className="col col--4">
-    ### ORM & Models  
-    Define models, relationships, and migrations using modern PHP.
-  </div>
-</div>
+- **Controllers** define routes and actions via PHP attributes — no separate routing file needed
+- **Models** define their database schema and relationships through attributes — migrations are generated automatically
+- **Services** are resolved automatically through the dependency injection container
+- **Auth** is managed through sentinels and policies — pluggable, testable, and attribute-driven
+- **Everything stays close to your code**, not hidden in YAML or XML config files
 
 ---
 
-## 💡 Philosophy
-:::info
-Strux is designed to be **simple, explicit, and modern** — without sacrificing performance or developer experience.
-:::
+## What's Next?
+
+| Topic | Description |
+|-------|-------------|
+| [Getting Started](getting-started/installation.md) | Install, configure, and scaffold a new application |
+| [Database Layer](database/introduction.md) | Connections, drivers, and configuration |
+| [Schema Attributes](database/attributes.md) | Define your database schema with PHP attributes |
+| [ORM Models](orm/models.mdx) | Querying, relationships, events, and more |
+| [Query Builder](orm/query-builder.mdx) | Fluent SQL without raw strings |
+| [Auth System](security/auth-intro.md) | Authentication, authorization, roles, and policies |
+| [Controllers](core/controllers.md) | Routing, request handling, responses |
+| [Middleware](core/middleware.mdx) | Request filtering and guards |
+| [Views](views/twig.md) | Twig templating |
+
+---
+
+## Philosophy
+
+> [!INFO]
+> Strux is designed to be **simple, explicit, and modern** — without sacrificing performance or developer experience.
 
 Strux gives you control without forcing ceremony — ideal for APIs, web apps, and internal tools alike.
-
----
-
-Ready to dive in?
-Start with the **[Controllers](/docs/controllers)** or **[Routing](/docs/routing)** sections to build your first feature.

@@ -1,0 +1,340 @@
+---
+title: Ad-Hoc Queries (db / DB)
+sidebar_position: 3.5
+---
+
+# Ad-Hoc Queries: Querying Without a Model
+
+Sometimes you need to query a table that doesn't have a dedicated Model class, or you just want a quick lookup without setting up a whole model. Strux provides three ways to query your database — each suited for a different situation.
+
+> [!INFO]
+> Think of this as the difference between renting a car and buying one. The `db()` helper and `DB` facade are like renting — quick and convenient when you need it. Creating a Model class is like buying — more investment up front, but you get full features (relationships, events, casting).
+
+---
+
+## 1. The Three Ways to Query
+
+| Approach | Syntax | Best For |
+|----------|--------|----------|
+| **Concrete Model** | `User::where('active', 1)->get()` | Full-featured queries with relationships, events, casting |
+| **DB Facade** | `DB::from('users')->where('active', 1)->get()` | Static access anywhere, no model needed |
+| **db() Helper** | `db()->from('users')->where('active', 1)->get()` | Quick inline queries in controllers, templates, or closures |
+
+All three return the same `Collection` of results. The difference is what you get back per row.
+
+---
+
+## 2. Concrete Model (Full Features)
+
+When you have a dedicated Model class (like `App\Models\User`), you get everything:
+
+```php
+$user = User::with('roles', 'permissions')
+    ->where('active', 1)
+    ->first();
+
+echo $user->roles;           // Relationship loaded via #[OwnedByMany]
+echo $user->status;          // Attribute casting (enum → string)
+echo $user->createdAt;       // Timestamp casting (string → DateTime)
+$user->sendWelcomeEmail();   // Custom model method
+
+// Events fire automatically
+$user = new User(['email' => '...']);
+$user->save();               // Dispatches Created, Saved events
+```
+
+**What you get with a Model class:**
+- **Relationships** — `#[OwnedByMany]`, `#[OwnedBy]`, etc.
+- **Attribute casting** — `#[Column]` type conversions (JSON arrays, enums, DateTime)
+- **Lifecycle events** — `Created`, `Updated`, `Saved`, `Deleted`, `Validated`
+- **Validation** — `#[Validate]` rules auto-checked on `save()`
+- **Global scopes** — automatically applied to every query
+- **Soft deletes** — `deleted_at` handling
+- **Custom methods** — business logic on the entity
+
+> [!TIP]
+> Any model class that defines relationships, uses events, or relies on attribute casting **must** be queried through the Model itself. Using `db()` on the same table returns plain `Adhoc` instances that have none of these features.
+
+---
+
+## 3. The `DB` Facade
+
+The `DB` facade provides static access to ad-hoc queries anywhere in your codebase — controllers, services, event listeners, CLI commands.
+
+```php
+use Strux\Support\Bridge\DB;
+
+// Fetch a single row
+$user = DB::from('users')->where('id', $id)->first();
+echo $user->email;           // Property access works
+echo $user->firstname();     // Method access also works (Twig-friendly)
+
+// Multiple rows
+$products = DB::from('products')
+    ->where('active', 1)
+    ->orderBy('price', 'ASC')
+    ->get();
+
+// Aggregates
+$count = DB::from('orders')->where('status', 'pending')->count();
+
+// Joins across tables
+$results = DB::from('orders AS o')
+    ->join('users AS u', 'o.user_id', '=', 'u.id')
+    ->select('o.*', 'u.email')
+    ->where('o.status', 'shipped')
+    ->get();
+```
+
+### How it Works
+
+`DB` extends `FrameworkBridge`, following the same facade pattern as `Router`, `Request`, and `Config`. When you call `DB::from('users')`, the bridge resolves a transient `Adhoc` instance from the DI container, then calls `from('users')` on it.
+
+```php
+// What happens internally:
+$query = container()->get('db.query');  // Fresh Adhoc query builder
+$query->from('users');                   // Sets the table
+return $query;                           // Ready for chaining
+```
+
+> [!NOTE]
+> Each `DB::` call resolves a fresh query builder instance from the container. The instance is transient — it is created once per call and not reused.
+
+---
+
+## 4. The `db()` Helper
+
+The `db()` helper is a global function for quick inline queries. It is exactly equivalent to `DB::` but shorter and more natural in procedural contexts.
+
+```php
+// Both are equivalent:
+$user = DB::from('users')->where('id', 1)->first();
+$user = db()->from('users')->where('id', 1)->first();
+```
+
+### Skipping `from()` — Starting with `where()`
+
+Unlike `DB::from()`, the `db()` helper does NOT require a `from()` call. You can start chaining directly with `where()`, `select()`, or any query builder method:
+
+```php
+// These all work:
+$user = db()->where('active', 1)->get();
+$count = db()->select('COUNT(*)')->from('orders')->value();
+$names = db()->select('name')->distinct()->get();
+```
+
+When you call `db()`, you get a fresh `Adhoc` query builder with no table set. The first query method you call determines what happens next — you can still chain indefinitely.
+
+> [!TIP]
+> Use `db()` for quick one-liners in controllers, templates, or anywhere you need a fast query without importing a facade class. Use `DB::from()` in service-layer code where static access is cleaner.
+
+### In Twig Templates
+
+The `db()` helper is available in Twig templates for quick data lookups:
+
+```twig
+{% set recent = db().from('products').where('active', 1).orderBy('created_at', 'DESC').take(5).get() %}
+{% for product in recent %}
+    {{ product.name }} - {{ product.price }}
+{% endfor %}
+```
+
+> [!WARNING]
+> Use `db()` in templates sparingly. Heavy query logic belongs in controllers and services. Templates should focus on presentation.
+
+---
+
+## 5. The `Adhoc` Model Class
+
+Both `db()` and `DB::from()` return an `Adhoc` instance — a concrete Model subclass that acts as a lightweight query builder and result container.
+
+```php
+$query = db()->from('users');            // Adhoc in "query mode"
+$users = $query->where('active', 1)->get(); // Collection of Adhoc instances
+$user = $users->first();                 // Single Adhoc in "loaded" mode
+```
+
+### Property and Method Access
+
+Every column value is accessible both as a property and as a method call:
+
+```php
+echo $user->firstname;     // Property access via __get
+echo $user->firstname();   // Method access via __call
+```
+
+This is especially important for **Twig templates**, where Twig 3 tries method calls before property access:
+
+```twig
+{{ user.firstname }}
+{# Twig first tries $user->firstname(), then $user->firstname #}
+```
+
+The `Adhoc` class overrides `__call` to catch method calls that don't exist as real methods and falls back to the `_original` data array. This means `{{ user.firstname }}` in Twig always works, regardless of whether Twig resolves it as a method or a property.
+
+### Table Name Tracking
+
+When you use `from('users')`, the table name is stored on the query builder and propagated to every loaded result:
+
+```php
+$user = db()->from('users')->where('id', 1)->first();
+echo $user->getTable();  // 'users' — correctly set
+```
+
+Without ad-hoc table tracking, the table name would default to `'adhocs'` (derived from the class name `Adhoc`).
+
+---
+
+## 6. Decision Guide
+
+### Use a Concrete Model When...
+
+| Scenario | Why |
+|----------|-----|
+| You need relationships | `$user->roles` requires `#[OwnedByMany]` on a Model |
+| You need attribute casting | JSON columns, enums, DateTime casting |
+| You need lifecycle events | `Created`, `Updated`, `Deleted` listeners |
+| You need validation | `#[Validate]` rules on save |
+| You need global scopes | Automatic query filtering |
+| You have custom business logic | Methods on the entity |
+| You are writing unit tests | Mocking and factory support |
+
+### Use `DB::from()` or `db()` When...
+
+| Scenario | Why |
+|----------|-----|
+| You are querying a pivot/link table | `db()->from('role_user')->where('user_id', $id)->get()` |
+| You need a quick lookup | "Just give me the count" |
+| You are joining multiple tables | Ad-hoc queries don't need model classes for every joined table |
+| You are building a report | Aggregates across multiple tables |
+| You are in a Twig template | Quick data access without controller overhead |
+| You don't have a Model yet | Prototyping or exploring the database |
+
+### Concrete Examples
+
+```php
+// ✅ DO: Use Model for feature-rich queries
+$user = User::with('roles')->find(1);
+$user->assignRole('admin');
+$user->save();  // Fires events, validates
+
+// ✅ DO: Use db() for quick inline lookups
+$count = db()->from('sessions')->where('user_id', $id)->count();
+
+// ✅ DO: Use DB for service-layer ad-hoc queries
+$report = DB::from('orders AS o')
+    ->join('order_items AS oi', 'o.id', '=', 'oi.order_id')
+    ->select('o.*', 'oi.product_name', 'oi.quantity')
+    ->where('o.created_at', '>=', $startDate)
+    ->get();
+
+// ❌ DON'T: Use db() for something with relationships
+$user = db()->from('users')->where('id', $id)->first();
+$user->roles;  // Fails — Adhoc has no #[OwnedByMany] attribute
+
+// ✅ DO: Use Model instead
+$user = User::with('roles')->find($id);
+
+// ❌ DON'T: Use db() when you need events
+$user = db()->from('users')->where('id', $id)->first();
+$user->email = 'new@example.com';
+$user->save();  // No events fired, no validation
+
+// ✅ DO: Use Model instead
+$user = User::find($id);
+$user->email = 'new@example.com';
+$user->save();  // Fires Updated event, runs validation
+```
+
+---
+
+## 7. Limitations of Ad-Hoc Queries
+
+### No Relationships
+
+Adhoc instances have no relationship attributes. The following will throw an error:
+
+```php
+$user = db()->from('users')->where('id', 1)->first();
+$user->roles;   // RuntimeException: Call to undefined method Adhoc::roles()
+```
+
+Relationships are defined as `#[OwnedByMany]` or `#[OwnedBy]` attributes on concrete Model classes. Adhoc has none of these.
+
+> [!IMPORTANT]
+> If you need relationships, always use the concrete Model class: `User::with('roles')->find($id)`.
+
+### No Lifecycle Events
+
+When you modify and save an Adhoc instance, no lifecycle events are dispatched:
+
+```php
+$user = db()->from('users')->where('id', 1)->first();
+$user->email = 'new@example.com';
+$user->save();  // Updated event NOT fired
+```
+
+### No Attribute Casting
+
+Values are returned as-is from the database. JSON columns are plain strings, not decoded arrays. Date strings are not converted to DateTime objects.
+
+### No Validation
+
+The `#[Validate]` attribute rules are not checked when saving an Adhoc instance.
+
+### No Scopes
+
+Global scopes defined on a Model class do not apply to ad-hoc queries. If your `User` model has a global scope that filters archived users, `db()->from('users')` will still return archived users.
+
+---
+
+## 8. API Reference
+
+### `db()` Helper
+
+| Call | Returns | Description |
+|------|---------|-------------|
+| `db()` | `Adhoc` | Returns a fresh ad-hoc query builder (transient) |
+| `db()->from($table)` | `Adhoc` | Sets the table and returns the builder |
+| `db()->where(...)` | `Adhoc` | Starts building a query (no `from()` needed) |
+
+### `DB` Facade
+
+| Call | Returns | Description |
+|------|---------|-------------|
+| `DB::from($table)` | `Adhoc` | Sets the table and returns the builder |
+| `DB::table($table)` | `Adhoc` | Alias of `from()` |
+
+> [!NOTE]
+> `DB::table()` is an alias for `DB::from()` provided for developers who find `table()` more readable. Both are identical in behavior.
+
+### What You Get Back
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `->get()` | `Collection` of `Adhoc` | Multiple rows |
+| `->first()` | `Adhoc` or `null` | Single row |
+| `->find($id)` | `Adhoc` or `null` | Find by primary key |
+| `->value($column)` | `mixed` | Single column value from first row |
+| `->count()` | `int` | Count of matching rows |
+| `->pluck($column)` | `Collection` | All values of a single column |
+
+---
+
+## 9. Quick Reference
+
+```
+Need relationships?   → Use Model  (User::with('roles')->find($id))
+Need events?          → Use Model  (User::find($id)->save())
+Need casting?         → Use Model  (User::whereJson(...)->get())
+Need validation?      → Use Model  (new User([...])->save())
+
+Quick lookup?          → Use db()  (db()->from('users')->where('id', $id)->first())
+Static query?          → Use DB    (DB::from('users')->where('active', 1)->get())
+Pivot table?           → Use db()  (db()->from('role_user')->where(...)->get())
+Join-heavy report?     → Use db()  (db()->from('orders')->join(...)->get())
+Template one-liner?    → Use db()  ({% set items = db().from('products')->get() %})
+```
+
+> [!TIP]
+> When in doubt, start with `Model::query()`. You can always refactor to `db()` later if you find you are not using any model-specific features. The reverse (adding features to an ad-hoc query) requires restructuring your code.
