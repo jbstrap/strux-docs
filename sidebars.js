@@ -133,6 +133,14 @@ const sidebars = {
         },
         {
             type: 'category',
+            label: 'Scheduler',
+            collapsed: false,
+            items: [
+                { type: 'doc', id: 'scheduler/scheduler', label: 'Task Scheduling' },
+            ],
+        },
+        {
+            type: 'category',
             label: 'Views',
             collapsed: false,
             items: [

@@ -38,6 +38,104 @@
     padding-bottom: 4rem !important;
 }
 
+/* -------------------------------------------------------------------------
+ * GFM Alert Callout Styling (remark-github-blockquote-alert)
+ * Matches Docusaurus admonition look & feel
+ * ------------------------------------------------------------------------- */
+.markdown-alert {
+    --alert-border-color: var(--ifm-color-primary);
+    --alert-background: rgba(99, 102, 241, 0.08);
+    --alert-title-color: var(--ifm-color-primary);
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+    border-left: 4px solid var(--alert-border-color);
+    background: var(--alert-background);
+    border-radius: 0.4rem;
+}
+
+.markdown-alert-title {
+    display: flex;
+    align-items: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 0.25rem;
+    color: var(--alert-title-color);
+}
+
+/* Note — blue */
+.markdown-alert-note {
+    --alert-border-color: #4dabf7;
+    --alert-background: rgba(77, 171, 247, 0.08);
+    --alert-title-color: #4dabf7;
+}
+
+/* Tip — green */
+.markdown-alert-tip {
+    --alert-border-color: #40c057;
+    --alert-background: rgba(64, 192, 87, 0.08);
+    --alert-title-color: #40c057;
+}
+
+/* Important — purple */
+.markdown-alert-important {
+    --alert-border-color: #7950f2;
+    --alert-background: rgba(121, 80, 242, 0.08);
+    --alert-title-color: #7950f2;
+}
+
+/* Warning — yellow/amber */
+.markdown-alert-warning {
+    --alert-border-color: #fab005;
+    --alert-background: rgba(250, 176, 5, 0.08);
+    --alert-title-color: #fab005;
+}
+
+/* Caution — red */
+.markdown-alert-caution {
+    --alert-border-color: #fa5252;
+    --alert-background: rgba(250, 82, 82, 0.08);
+    --alert-title-color: #fa5252;
+}
+
+/* Dark mode adjustments */
+[data-theme='dark'] .markdown-alert-note {
+    --alert-background: rgba(77, 171, 247, 0.12);
+}
+[data-theme='dark'] .markdown-alert-tip {
+    --alert-background: rgba(64, 192, 87, 0.12);
+}
+[data-theme='dark'] .markdown-alert-important {
+    --alert-background: rgba(121, 80, 242, 0.12);
+}
+[data-theme='dark'] .markdown-alert-warning {
+    --alert-background: rgba(250, 176, 5, 0.12);
+}
+[data-theme='dark'] .markdown-alert-caution {
+    --alert-background: rgba(250, 82, 82, 0.12);
+}
+
+/* Icon styling — inherit alert title color, align with text */
+.markdown-alert .octicon {
+    fill: currentColor;
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 0.35rem;
+    margin-top: -2px;
+}
+
+/* Nested content inside alerts */
+.markdown-alert p:last-child {
+    margin-bottom: 0;
+}
+.markdown-alert code {
+    background: rgba(0, 0, 0, 0.06);
+}
+[data-theme='dark'] .markdown-alert code {
+    background: rgba(255, 255, 255, 0.1);
+}
+
 /* Dark Mode Overrides */
 [data-theme='dark'] {
     --ifm-color-primary: #818cf8; /* Lighter indigo for dark mode contrast */

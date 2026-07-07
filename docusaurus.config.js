@@ -33,6 +33,9 @@ const config = {
                 docs: {
                     sidebarPath: require.resolve('./sidebars.js'),
                     editUrl: 'https://github.com/jbstrap/strux-docs/tree/main/',
+                    remarkPlugins: [
+                        [require('remark-github-blockquote-alert').default, {}],
+                    ],
                 },
                 theme: {
                     customCss: require.resolve('./src/css/custom.css'),

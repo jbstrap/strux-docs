@@ -641,10 +641,8 @@ class ScheduleRegistrar
 > [!IMPORTANT]
 > The `->at('HH:MM')` method only works when preceded by `->daily()`. It converts the time into a cron expression internally. For example, `->daily()->at('03:30')` becomes `30 3 * * *`.
 
-> [!TIP]
-> You do not have to call `->register()` explicitly. The builder automatically creates and registers the `Task` when you call any terminal method like `->daily()`, `->hourly()`, etc. Wait, actually you DO need to call `->register()`. Let me check the code...
-
-Actually, looking at the ScheduleBuilder implementation, `->register()` is what creates the `Task` and adds it to the scheduler. But the fluent methods return `$this`, so you need to call `->register()` at the end:
+> [!IMPORTANT]
+> You **must** call `->register()` at the end of the fluent chain. The fluent methods (`->daily()`, `->hourly()`, etc.) return the builder for chaining but do NOT register the task. Only `->register()` creates the `Task` and adds it to the scheduler.
 
 ```php
 $scheduler->call(fn() => doSomething())
