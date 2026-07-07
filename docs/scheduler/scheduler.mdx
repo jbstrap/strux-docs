@@ -955,7 +955,12 @@ When a task runs, any output it generates (from `echo`, `print`, `var_dump`, etc
 
 ### The Solution: SendOutputTo
 
-The `#[SendOutputTo]` attribute captures all output from a task and writes it to a file:
+The `#[SendOutputTo]` attribute captures all output from a task and writes it to a file.
+
+You can specify the output destination in two ways:
+
+- **`path`** — An absolute filesystem path (use when you need full control)
+- **`filename`** — A relative filename resolved against the application's `logs` directory (the recommended approach)
 
 ```php
 use Strux\Component\Scheduler\Attributes\Schedule;
@@ -979,8 +984,40 @@ class GenerateReport
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `path` | `string` | (required) | Full path to the output file |
+| `path` | `?string` | `null` | Full absolute path to the output file |
+| `filename` | `?string` | `null` | Relative filename resolved against the app's `logs` directory |
 | `append` | `bool` | `false` | If `true`, appends to existing file. If `false`, overwrites each run. |
+
+You must provide either `path` or `filename`. If both are omitted, the output is not captured.
+
+### Using `filename` (Recommended)
+
+When you use `filename`, the path is resolved automatically through the application's `DirectoryInterface`, which maps the key `'logs'` to `var/logs/` by default. This means you never need to hardcode absolute paths:
+
+```php
+// Writes to {root}/var/logs/scheduler-close-auctions.log
+#[Schedule(frequency: 'everyminute')]
+#[SendOutputTo(filename: 'scheduler-close-auctions.log', append: true)]
+class CloseExpiredAuctions
+{
+    public function handle(): void
+    {
+        echo "Checking for expired auctions...\n";
+        // ... do work ...
+    }
+}
+```
+
+The `filename` is joined with the application's configured `logs` directory (`var/logs/` by default).
+
+### Using `path` (Explicit)
+
+Use `path` when you need to write outside the standard logs directory:
+
+```php
+// Write to a custom location
+#[SendOutputTo(path: '/var/log/daily-report.log', append: true)]
+```
 
 ### Appending vs Overwriting
 
@@ -990,6 +1027,9 @@ class GenerateReport
 
 // Append to existing file (grows over time)
 #[SendOutputTo(path: '/tmp/backup-history.log', append: true)]
+
+// With filename (always appends to var/logs/)
+#[SendOutputTo(filename: 'backup-history.log', append: true)]
 ```
 
 > [!WARNING]

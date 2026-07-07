@@ -1,7 +1,7 @@
 ---
 slug: strux-v1-4-0-attribute-driven-auth
-title: "Strux v1.4.0: Fully Attribute-Driven Auth & Smarter Route Binding"
-tags: [releases, changelog]
+title: "Strux v1.4.0: Attribute-Driven Auth, Task Scheduling & Smarter Route Binding"
+tags: [releases, changelog, scheduled-tasks]
 ---
 
 We are thrilled to announce **Strux v1.4.0**! This release completes the transition from config-driven to fully attribute-driven authentication, introduces a brand-new `$this->auth` DX in controllers, adds remember-me support, and brings smarter route model binding with `#[RouteEntity]`.
@@ -97,6 +97,48 @@ The ORM now supports `with()` as a public alias for `include()`. Both are equiva
 $artworks = Artwork::with('artist', 'categories')->get();
 ```
 
+### ⏰ Task Scheduling (Attribute-Driven)
+
+The scheduler component is now production-ready. Define recurring tasks using the `#[Schedule]` attribute — no crontab editing, no shell scripts, just pure PHP.
+
+**Attribute-driven tasks** — Annotate any class with `#[Schedule]` and the scheduler auto-discovers it:
+
+```php
+#[Schedule(frequency: 'daily')]
+class GenerateDailyReport
+{
+    public function handle(): void
+    {
+        // Runs every day at midnight
+    }
+}
+```
+
+**Fluent API** — Register tasks programmatically without attributes:
+
+```php
+$scheduler->call(function () {
+    // Cleanup logic
+})->everyFiveMinutes()->timezone('UTC')->register();
+
+$scheduler->job(SendNewsletter::class)
+    ->weekly()
+    ->sendOutputTo('/var/log/newsletter.log')
+    ->register();
+```
+
+**Production safety features** — `#[WithoutOverlapping]` prevents concurrent runs via mutex locking, `#[RunWhen]` adds conditional execution, `#[SendOutputTo]` captures stdout to files, and the scheduler respects maintenance mode and environment restrictions.
+
+**CLI commands** — Three new commands to manage the scheduler:
+
+| Command | Purpose |
+|---------|---------|
+| `schedule:run` | Run all due tasks once (use in crontab) |
+| `schedule:work` | Start the scheduler daemon (runs forever) |
+| `new:scheduled-task <Name>` | Scaffold a new task class with `#[Schedule]` |
+
+**Observability** — The scheduler fires `TaskStarting`, `TaskSuccess`, `TaskFailed`, and `TaskSkipped` events. Every execution logs duration in milliseconds and peak memory usage — no more guessing if your tasks are healthy.
+
 ---
 
-Upgrade to v1.4.0 via Composer today, and check out the updated [Authentication](/docs/security/auth-intro) and [Controllers](/docs/core/controllers) documentation.
+Upgrade to v1.4.0 via Composer today, and check out the updated [Authentication](/docs/security/auth-intro), [Task Scheduling](/docs/scheduler), and [Controllers](/docs/controllers) documentation.
