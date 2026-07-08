@@ -106,6 +106,7 @@ const sidebars = {
             collapsed: false,
             items: [
                 { type: 'doc', id: 'core/cookies', label: 'Cookies' },
+                { type: 'doc', id: 'core/encryption', label: 'Encryption' },
                 { type: 'doc', id: 'validation/validation', label: 'Validation' },
                 { type: 'doc', id: 'security/auth-intro', label: 'Auth Introduction' },
                 { type: 'doc', id: 'security/login', label: 'Login & Remember Me' },
