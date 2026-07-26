@@ -1,110 +1,424 @@
 ---
 title: Middleware
 slug: /middleware
-description: Intercepting and filtering HTTP requests with PSR-15 Middleware.
+description: Intercepting and filtering HTTP requests with PSR-15 Middleware in Strux.
 ---
 
 # Middleware
 
-Middleware provides a powerful mechanism for **intercepting and filtering HTTP requests** entering your application.  
-They act as layers of an **onion**, surrounding your core application logic.
+Middleware is one of the most powerful concepts in Strux. It gives you a clean, organized way to **intercept, inspect, and modify** every HTTP request that comes into your application — and every response that goes back out.
 
-Common use cases include:
+Think of middleware as a **security checkpoint** at the entrance of a building. Every visitor (request) must pass through the checkpoint, where they can be checked, their bags scanned, and a badge issued — before they're allowed into the building (your controller). On the way out, the same checkpoint can inspect what they're carrying (the response) and add a stamp before they leave.
 
-- Authenticating users
-- Checking CSRF tokens
-- Trimming or sanitizing input
-- Logging requests
-- Handling CORS headers
+---
+
+## What Problems Does Middleware Solve?
+
+Without middleware, you'd have to repeat the same logic in every controller:
+
+- "Is this user logged in?" — you'd check this in *every* protected controller.
+- "Is this a CSRF-safe request?" — you'd verify tokens manually *everywhere*.
+- "Is this user allowed here?" — permission checks would be scattered across your code.
+
+Middleware solves this by letting you write that logic **once** and apply it to **every request**, **specific routes**, or **entire controllers**. Your controllers stay clean and focused on business logic.
+
+:::tip Think of it this way
+Middleware is like a **to-do list** that runs automatically before and after every request. You write the to-do items once, and the framework runs them for you — every single time.
+:::
+
+---
+
+## Common Use Cases
+
+Here are some things middleware is commonly used for:
+
+| Category | Examples |
+| --- | --- |
+| **Security** | [CSRF protection](../security/protecting-routes.md), [cookie encryption](./middleware-advanced.mdx#encrypt-cookies-middleware), [authentication](../security/auth-intro.md) |
+| **Rate Limiting** | Prevent abuse by limiting how many requests a user can make |
+| **Input Processing** | Trimming whitespace, converting empty strings to `null` |
+| **Logging** | Recording every request that hits your application |
+| **CORS** | Allowing or blocking cross-origin requests |
+| **Maintenance** | Showing a "down for maintenance" page |
+| **HTTP Methods** | Allowing HTML forms to send `PUT`, `PATCH`, or `DELETE` requests |
 
 ---
 
 ## The PSR-15 Standard
 
-Strux is fully compatible with **PSR-15 (HTTP Server Request Handlers)**.
+Strux is fully compatible with **PSR-15 (HTTP Server Request Handlers)** — a widely-adopted PHP standard.
 
-This means:
+What does this mean for you?
 
-- Middleware must implement `Psr\Http\Server\MiddlewareInterface`
-- You can reuse middleware from the wider PHP ecosystem
-- Your application stays framework-agnostic and interoperable
+- **Your middleware works everywhere.** Any middleware you write for Strux can be used in any other PSR-15 compatible framework (Slim, Laravel, Laminas, etc.).
+- **Third-party middleware works in Strux.** Any PSR-15 middleware from the PHP ecosystem can be dropped into your Strux application and it will just work.
+- **Your code stays future-proof.** You're not locked into a proprietary system.
+
+:::info PSR-15 in Plain English
+PSR-15 simply says: "A middleware is a class with one method called `process()`. It receives a request, does something with it, and either passes the request to the next middleware or returns a response directly." That's the whole contract — simple and universal.
+:::
 
 ---
 
-## Creating Middleware
+## The Onion Model
 
-Let’s create a middleware that ensures the user is an administrator.
+Middleware works like an **onion**. Each middleware wraps around the next, forming layers. When a request comes in, it passes through each layer from the outside in. When the response goes back, it passes through the same layers in reverse order.
+
+Here's a visual representation of what happens when a user visits your website:
+
+```
+┌─────────────────────────────────────────────────┐
+│  ErrorHandlerMiddleware (catches all errors)     │
+│  ┌─────────────────────────────────────────────┐ │
+│  │  CorsMiddleware (CORS headers)              │ │
+│  │  ┌─────────────────────────────────────────┐│ │
+│  │  │  PoweredByMiddleware (X-Powered-By)     ││ │
+│  │  │  ┌─────────────────────────────────────┐││ │
+│  │  │  │  RequestLoggerMiddleware (logging)  │││ │
+│  │  │  │  ┌─────────────────────────────────┐│││ │
+│  │  │  │  │  EncryptCookiesMiddleware       ││││ │
+│  │  │  │  │  ┌─────────────────────────────┐││││ │
+│  │  │  │  │  │  RateLimitingMiddleware      │││││ │
+│  │  │  │  │  │  ┌─────────────────────────┐│││││ │
+│  │  │  │  │  │  │  CsrfProtectionMiddleware││││││ │
+│  │  │  │  │  │  │  ┌─────────────────────┐││││││ │
+│  │  │  │  │  │  │  │  YOUR CONTROLLER    │││││││ │
+│  │  │  │  │  │  │  └─────────────────────┘││││││ │
+│  │  │  │  │  │  └─────────────────────────┘│││││ │
+│  │  │  │  │  └─────────────────────────────┘││││ │
+│  │  │  │  └─────────────────────────────────┘│││ │
+│  │  │  └─────────────────────────────────────┘││ │
+│  │  └─────────────────────────────────────────┘│ │
+│  └─────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────┘
+```
+
+### Request Flow (Inbound)
+
+```
+User's Browser → ErrorHandler → Cors → PoweredBy → RequestLogger → EncryptCookies → RateLimiting → CsrfProtection → Controller
+```
+
+### Response Flow (Outbound)
+
+```
+Controller → CsrfProtection → RateLimiting → EncryptCookies → RequestLogger → PoweredBy → Cors → ErrorHandler → User's Browser
+```
+
+Each middleware gets a chance to:
+1. **Look at the request** before it reaches the controller
+2. **Do something** (add headers, check permissions, log, etc.)
+3. **Pass the request along** to the next middleware by calling `$handler->handle($request)`
+4. **Look at the response** after the controller returns
+5. **Modify the response** if needed (add headers, change the body, etc.)
+
+:::warning Why does order matter?
+If you add CORS headers *after* authentication middleware, the browser won't receive CORS headers when authentication fails — and the request will be blocked by the browser. Middleware order determines what happens first and what happens last. Getting the order right is critical.
+:::
+
+---
+
+## Creating Your Own Middleware
+
+Every middleware in Strux is a PHP class that implements `Psr\Http\Server\MiddlewareInterface`. This interface requires exactly one method: `process()`.
+
+### The Anatomy of a Middleware
 
 ```php
+<?php
+
+declare(strict_types=1);
+
 namespace App\Http\Middleware;
 
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Server\MiddlewareInterface;
 use Psr\Http\Server\RequestHandlerInterface;
-use Strux\Component\Http\Response;
 
-class EnsureUserIsAdmin implements MiddlewareInterface
+class MyFirstMiddleware implements MiddlewareInterface
+{
+    /**
+     * This is the only method you need to implement.
+     *
+     * $request  — The incoming HTTP request (who is visiting, what they want)
+     * $handler  — The "next step" (the next middleware, or the controller)
+     *
+     * You MUST call $handler->handle($request) to continue the pipeline,
+     * UNLESS you want to short-circuit and return a response immediately.
+     */
+    public function process(
+        ServerRequestInterface $request,
+        RequestHandlerInterface $handler
+    ): ResponseInterface {
+        // ============================================
+        // STEP 1: Before the controller runs
+        // ============================================
+        // Do something with the request here.
+        // For example: check if the user is logged in, validate a token, etc.
+
+        // Example: Add a custom header to the request
+        $request = $request->withAttribute('started_at', microtime(true));
+
+        // ============================================
+        // STEP 2: Pass to the next middleware / controller
+        // ============================================
+        // This line is important! Without it, the request stops here.
+        $response = $handler->handle($request);
+
+        // ============================================
+        // STEP 3: After the controller runs
+        // ============================================
+        // Do something with the response here.
+        // For example: add headers, log the response time, etc.
+
+        return $response;
+    }
+}
+```
+
+### Step-by-Step Explanation
+
+Let's break down each part:
+
+**1. The `process()` method signature**
+
+```php
+public function process(
+    ServerRequestInterface $request,
+    RequestHandlerInterface $handler
+): ResponseInterface
+```
+
+- `$request` — An immutable PSR-7 object representing the incoming HTTP request. It contains everything: the URL, headers, cookies, form data, uploaded files, etc.
+- `$handler` — Represents the "rest of the pipeline." When you call `$handler->handle($request)`, you're saying "pass this request to the next middleware (or the controller)."
+- The method **must return** a `ResponseInterface` — the HTTP response that will be sent back to the user.
+
+**2. Before the controller**
+
+```php
+$request = $request->withAttribute('started_at', microtime(true));
+```
+
+Since PSR-7 requests are **immutable** (they can't be changed), you use `withAttribute()` to attach custom data. This data will be available to all downstream middleware and controllers.
+
+**3. Passing to the next handler**
+
+```php
+$response = $handler->handle($request);
+```
+
+This is the most important line. It tells Strux to continue processing. If you forget this line, the request will stop at your middleware and the controller will never run.
+
+**4. After the controller**
+
+```php
+return $response;
+```
+
+Once the controller returns a response, you can modify it, add headers, or just pass it through.
+
+---
+
+### A Practical Example: Request Timer
+
+Let's create a middleware that measures how long each request takes and adds the duration as a response header:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Middleware;
+
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\ServerRequestInterface;
+use Psr\Http\Server\MiddlewareInterface;
+use Psr\Http\Server\RequestHandlerInterface;
+
+class RequestTimerMiddleware implements MiddlewareInterface
 {
     public function process(
         ServerRequestInterface $request,
         RequestHandlerInterface $handler
     ): ResponseInterface {
-        // Logic before the controller
-        $role = $request->getAttribute('user_role');
+        // Record the start time
+        $start = microtime(true);
 
-        if ($role !== 'admin') {
-            return new Response(403, [], 'Access Denied: Admins Only');
-        }
-
-        // Continue to the next middleware / controller
+        // Let the request continue to the controller
         $response = $handler->handle($request);
 
-        // Logic after the controller
-        return $response->withHeader('X-Checked-By', 'AdminMiddleware');
+        // Calculate how long it took
+        $duration = round((microtime(true) - $start) * 1000, 2);
+
+        // Add the duration as a response header
+        // Now the browser (and you, in dev tools) can see how long the server took
+        return $response->withHeader('X-Response-Time', $duration . 'ms');
     }
 }
-````
+```
+
+After this runs, every response from your application will include a header like:
+
+```
+X-Response-Time: 12.34ms
+```
+
+You can see this in your browser's developer tools (Network tab) or in API testing tools.
+
+---
+
+### A Practical Example: IP Blocker
+
+Here's a middleware that blocks requests from specific IP addresses:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Middleware;
+
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\ServerRequestInterface;
+use Psr\Http\Server\MiddlewareInterface;
+use Psr\Http\Server\RequestHandlerInterface;
+use Strux\Component\Http\Psr7\Response;
+
+class BlockIpMiddleware implements MiddlewareInterface
+{
+    private array $blockedIps;
+
+    public function __construct(array $blockedIps)
+    {
+        $this->blockedIps = $blockedIps;
+    }
+
+    public function process(
+        ServerRequestInterface $request,
+        RequestHandlerInterface $handler
+    ): ResponseInterface {
+        // Get the visitor's IP address
+        $clientIp = $request->getServerParams()['REMOTE_ADDR'] ?? '';
+
+        // Check if this IP is blocked
+        if (in_array($clientIp, $this->blockedIps, true)) {
+            // Don't pass to the controller — return a 403 immediately
+            $response = new Response(403);
+            $response->getBody()->write('Access Denied');
+            return $response;
+        }
+
+        // IP is not blocked — continue normally
+        return $handler->handle($request);
+    }
+}
+```
+
+Notice how we **don't call** `$handler->handle()` when the IP is blocked. This is called **short-circuiting** — we stop the pipeline and return a response immediately. The controller never runs.
+
+:::tip Short-circuiting
+You don't always have to call `$handler->handle($request)`. If you want to stop the request (e.g., return a 403 Forbidden, 429 Too Many Requests, or redirect), you can return a response directly without calling `$handler`. This is how authentication middleware blocks unauthenticated users, and how rate limiting blocks excessive requests.
+:::
 
 ---
 
 ## Registering Middleware
 
-Strux supports middleware at **three different levels**.
+Strux supports middleware at **three different levels**. Each level determines *when* and *where* the middleware runs.
 
 ---
 
-### 1️⃣ Global Middleware
+### 1. Global Middleware
 
-Global middleware runs on **every HTTP request**.
+Global middleware runs on **every single HTTP request** that enters your application. This is where you put cross-cutting concerns — things that affect *all* requests regardless of which route is being visited.
 
-Typical examples include:
+**Typical global middleware:**
 
-* Sessions
-* CSRF protection
-* Request body parsing
-* CORS handling
+- Error handling (catch all exceptions)
+- CORS headers (allow cross-origin requests)
+- Request logging (record all incoming requests)
+- [Cookie encryption](./middleware-advanced.mdx#encrypt-cookies-middleware) (encrypt all cookies)
+- [Rate limiting](./middleware-advanced.mdx#ratelimiting-middleware) (limit requests per IP)
+- CSRF protection (verify form tokens)
+- Input sanitization (clean up form data)
 
-Registered during bootstrapping:
+**How to register global middleware:**
+
+Global middleware is registered during application bootstrapping. There are two ways to add it:
+
+#### A. Through the MiddlewareRegistry (Recommended)
+
+The `MiddlewareRegistry` is the standard way to register middleware. It has two methods:
+
+- `build()` — Register middleware as singletons in the DI container
+- `init()` — Add middleware to the application's global stack
 
 ```php
-$app = Bootstrap::create(ROOT_PATH);
+// src/Registry/MiddlewareRegistry.php
 
-// Global middleware stack
-$app->addMiddleware(
-    new \Strux\Component\Middleware\CsrfProtectionMiddleware()
-);
+namespace App\Registry;
 
-$app->addMiddleware(
-    new \App\Http\Middleware\LogRequests()
-);
+use Psr\Container\ContainerInterface;
+use Strux\Bootstrapping\Registry\ServiceRegistry;
+use Strux\Foundation\Application;
+use App\Http\Middleware\MyCustomMiddleware;
+
+class MiddlewareRegistry extends ServiceRegistry
+{
+    public function build(): void
+    {
+        // Register the middleware in the DI container
+        $this->container->singleton(
+            MyCustomMiddleware::class,
+            static fn(ContainerInterface $c) => new MyCustomMiddleware(
+                // Inject any dependencies here
+            )
+        );
+    }
+
+    public function init(Application $app): void
+    {
+        // Add the middleware to the global stack
+        $app->addMiddleware(
+            $this->container->get(MyCustomMiddleware::class)
+        );
+    }
+}
+```
+
+:::info How does the registry get loaded?
+Strux automatically discovers and loads all registry files from `src/Registry/*.php`. You don't need to manually register your registry — just create the file and Strux will find it. Read more about this in the [Service Registries](./registries.md) documentation.
+:::
+
+#### B. Directly in the Front Controller
+
+For quick, one-off middleware, you can add it directly in `web/index.php`:
+
+```php
+// web/index.php
+
+$app = App::create(rootPath: ROOT_PATH);
+
+// Add anonymous middleware directly
+$app->addMiddleware(new class implements \Psr\Http\Server\MiddlewareInterface {
+    public function process(
+        \Psr\Http\Message\ServerRequestInterface $request,
+        \Psr\Http\Server\RequestHandlerInterface $handler
+    ): \Psr\Http\Message\ResponseInterface {
+        // Your middleware logic here
+        return $handler->handle($request);
+    }
+});
+
+$app->run();
 ```
 
 ---
 
-### 2️⃣ Route Middleware (Attributes)
+### 2. Route-Level Middleware
 
-Apply middleware to **individual routes** using the `#[Middleware]` attribute.
+Route middleware applies to **a single specific route**. This is useful when only certain routes need protection.
 
 ```php
 use Strux\Component\Attributes\Route;
@@ -117,107 +431,524 @@ class DashboardController
     #[Middleware(EnsureUserIsAdmin::class)]
     public function settings()
     {
-        // Only accessible to admins
+        // This route is protected by EnsureUserIsAdmin
+        // Only admins can access this page
     }
 }
 ```
 
+When a user visits `/admin/settings`, the `EnsureUserIsAdmin` middleware runs **after** all global middleware but **before** the controller.
+
 ---
 
-### 3️⃣ Controller Middleware
+### 3. Controller-Level Middleware
 
-Apply middleware to an entire controller by attaching the attribute at the class level.
+You can apply middleware to **all routes** handled by a controller by placing the `#[Middleware]` attribute on the class itself:
 
 ```php
 use Strux\Component\Attributes\Middleware;
+use App\Http\Middleware\EnsureUserIsAdmin;
 
 #[Middleware(EnsureUserIsAdmin::class)]
 class AdminController
 {
-    public function index() {}
-    public function users() {}
+    public function index()
+    {
+        // Protected by EnsureUserIsAdmin
+    }
+
+    public function users()
+    {
+        // Also protected by EnsureUserIsAdmin
+    }
+
+    public function reports()
+    {
+        // Also protected by EnsureUserIsAdmin
+    }
 }
 ```
 
-All controller actions will be protected.
+All methods in `AdminController` are now protected. You don't need to add the attribute to each individual method.
+
+:::tip Combining route and controller middleware
+You can combine both levels. If a controller has `#[Middleware(A::class)]` and a method has `#[Middleware(B::class)]`, both middleware will run for that method — A first, then B.
+:::
 
 ---
 
-## Passing Data via Request Attributes
+## Passing Data Between Middleware and Controllers
 
-Middleware often needs to pass data (such as the authenticated user) to controllers.
+Middleware often needs to share data with controllers. For example, authentication middleware might resolve the current user and need to make it available to the controller.
 
-Since PSR-7 requests are **immutable**, you must use `withAttribute()`.
+Since PSR-7 requests are **immutable** (they can't be changed after creation), Strux uses **request attributes** to pass data. Think of attributes as custom properties that you can attach to the request object.
 
-### In Middleware
+### Setting Attributes (In Middleware)
 
 ```php
-public function process($request, $handler): ResponseInterface
-{
-    $user = $this->authService->getUser();
+public function process(
+    ServerRequestInterface $request,
+    RequestHandlerInterface $handler
+): ResponseInterface {
+    // Resolve the current user from the session
+    $user = $this->authService->getUserFromRequest($request);
 
+    // Attach the user to the request as an attribute
     $request = $request->withAttribute('current_user', $user);
 
+    // The controller will now have access to 'current_user'
     return $handler->handle($request);
 }
 ```
 
-### In Controller
+### Reading Attributes (In Controller)
 
 ```php
-public function index(Request $request)
+public function index(ServerRequestInterface $request)
 {
+    // Retrieve the user that the middleware attached
     $user = $request->getAttribute('current_user');
+
+    return $this->view->render('dashboard', ['user' => $user]);
 }
 ```
+
+:::info Immutable requests
+When you call `$request->withAttribute(...)`, you get back a **new** request object — the original is unchanged. This is why you must reassign the result: `$request = $request->withAttribute(...)`. This design makes middleware safe — one middleware can't accidentally corrupt the request for another middleware.
+:::
+
+### Common Request Attributes
+
+| Attribute | Set By | Description |
+| --- | --- | --- |
+| `current_user` | Auth middleware | The authenticated user object |
+| `csrf_token` | `CsrfProtectionMiddleware` | The current CSRF token |
+| `rate_limit_max` | `RateLimitingMiddleware` | Maximum requests allowed |
+| `rate_limit_remaining` | `RateLimitingMiddleware` | Requests remaining in the window |
+| `rate_limit_reset` | `RateLimitingMiddleware` | Unix timestamp when the limit resets |
+| `started_at` | Custom timing middleware | When the request started processing |
+
+---
+
+## The Default Middleware Stack
+
+When you create a new Strux application, the following middleware is registered **automatically** by the framework. They run in this exact order:
+
+### Global Middleware Pipeline
+
+| Order | Middleware | Purpose | Configurable |
+| --- | --- | --- | --- |
+| 1 | `ErrorHandlerMiddleware` | Catches all exceptions and renders error responses | Yes (in dev mode, replaced by Whoops) |
+| 2 | `CorsMiddleware` | Adds CORS headers for cross-origin requests | Yes (`src/Config/Cors.php`) |
+| 3 | `PoweredByMiddleware` | Adds or removes the `X-Powered-By` header | Yes (`src/Config/Headers.php`) |
+| 4 | `RequestLoggerMiddleware` | Logs every request with timing information | No (uses the app logger) |
+| 5 | `ConvertEmptyStringsToNull` | Converts empty form fields from `""` to `null` | No |
+| 6 | `MethodOverrideMiddleware` | Allows HTML forms to use `PUT`, `PATCH`, `DELETE` | Yes (via config) |
+| 7 | `EncryptCookiesMiddleware` | Encrypts all outgoing cookies, decrypts all incoming cookies | Yes (`src/Config/App.php` → `encrypt_cookies`) |
+| 8 | `RateLimitingMiddleware` | Limits the number of requests per IP address | Yes (`src/Config/App.php` → `rate_limiting`) |
+| 9 | `CsrfProtectionMiddleware` | Validates CSRF tokens on state-changing requests | Yes (`src/Config/Csrf.php`) |
+| 10 | `MaintenanceModeMiddleware` | Returns 503 when maintenance mode is active | Only added when `maintenance.active` is `true` |
+
+:::caution Order matters!
+Middleware runs in the order it's added. If you add your custom middleware at the wrong position, it might not have access to data set by earlier middleware, or it might run too late to be effective. Always consider the order carefully.
+:::
+
+---
+
+## Built-in Middleware Reference
+
+Strux ships with several middleware components. Here's what each one does:
+
+---
+
+### ErrorHandlerMiddleware
+
+**Purpose:** Catches all unhandled exceptions and renders error responses.
+
+This is the **most important** middleware in your stack. It wraps the entire request pipeline in a try-catch block. If any middleware or controller throws an exception, this middleware catches it and returns a proper error response instead of showing a blank page or a scary error to your users.
+
+It supports **content negotiation** — it detects whether the request expects HTML, JSON, or plain text, and renders the error in the appropriate format.
+
+```php
+// How it works internally:
+try {
+    return $handler->handle($request); // Everything else runs here
+} catch (Throwable $e) {
+    // Find the right formatter (HTML, JSON, or Plain Text)
+    foreach ($this->formatters as $formatter) {
+        if ($formatter->isValid($request)) {
+            return $formatter->handle($e, $request);
+        }
+    }
+    return $this->defaultFormatter->handle($e, $request);
+}
+```
+
+:::tip Development mode
+In development (`APP_DEBUG=true`), Strux disables the `ErrorHandlerMiddleware` and uses [Whoops](https://github.com/filp/whoops) instead — a beautiful error page with stack traces, variable inspection, and more. In production, Whoops is disabled and the `ErrorHandlerMiddleware` takes over.
+:::
+
+---
+
+### CorsMiddleware
+
+**Purpose:** Handles Cross-Origin Resource Sharing (CORS) headers.
+
+If your frontend is on a different domain or port than your API, the browser will block requests unless CORS headers are present. This middleware handles that for you.
+
+**Configuration:** `src/Config/Cors.php`
+
+---
+
+### PoweredByMiddleware
+
+**Purpose:** Manages the `X-Powered-By` HTTP header.
+
+In production, you might want to remove this header for security (it tells attackers what technology your server runs). In development, you might want to keep it for debugging.
+
+**Configuration:** `src/Config/Headers.php`
+
+---
+
+### RequestLoggerMiddleware
+
+**Purpose:** Logs every incoming request and outgoing response with timing information.
+
+It logs:
+- The HTTP method and URL
+- The client's IP address and user agent
+- The response status code
+- The total request duration in milliseconds
+
+Example log output:
+
+```
+[2026-07-11 14:30:15.123456] Request Start: POST /api/login
+[2026-07-11 14:30:15.234567] Request End: POST /api/login - Status: 200 - Duration: 111.12 ms
+```
+
+---
+
+### ConvertEmptyStringsToNull
+
+**Purpose:** Recursively converts empty strings (`""`) in form data to `null`.
+
+When a user submits a form with an empty text field, the browser sends an empty string. In many cases, you'd rather have `null` (which database drivers interpret as "no value") instead of an empty string.
+
+```php
+// Before middleware:
+['name' => 'John', 'email' => '', 'phone' => '']
+
+// After middleware:
+['name' => 'John', 'email' => null, 'phone' => null]
+```
+
+---
+
+### MethodOverrideMiddleware
+
+**Purpose:** Allows HTML forms to simulate `PUT`, `PATCH`, and `DELETE` HTTP methods.
+
+HTML forms only support `GET` and `POST`. But RESTful APIs use `PUT` (update), `PATCH` (partial update), and `DELETE` (remove). This middleware reads a `_method` field from the form body (or the `X-Http-Method-Override` header) and overrides the request method accordingly.
+
+```html
+<!-- In your HTML form -->
+<form method="POST" action="/users/42">
+    <input type="hidden" name="_method" value="PUT">
+    <!-- ... other fields ... -->
+    <button type="submit">Update User</button>
+</form>
+```
+
+The middleware sees `_method=PUT` and treats the request as a `PUT` — even though the browser technically sent a `POST`.
+
+---
+
+### CsrfProtectionMiddleware
+
+**Purpose:** Generates and validates CSRF (Cross-Site Request Forgery) tokens.
+
+CSRF attacks trick a logged-in user into submitting a form they didn't intend to (e.g., changing their password or making a payment). This middleware generates a unique token, stores it in the session, and verifies it on every state-changing request (`POST`, `PUT`, `PATCH`, `DELETE`).
+
+**Configuration:** `src/Config/Csrf.php`
+
+Read more about CSRF protection in the [Protecting Routes](../security/protecting-routes.md) documentation.
+
+---
+
+### MaintenanceModeMiddleware
+
+**Purpose:** Returns a `503 Service Unavailable` response when your application is in maintenance mode.
+
+When you're deploying updates or fixing bugs, you can activate maintenance mode to show users a friendly "we'll be right back" page. You can also whitelist specific IP addresses (so your team can still access the site) and specific routes (so health checks still work).
+
+**Configuration:** `src/Config/Maintenance.php`
+
+```php
+// src/Config/Maintenance.php
+'maintenance' => [
+    'active' => env('MAINTENANCE_ACTIVE', false),
+    'allowed_ips' => ['127.0.0.1', '::1'],
+    'allowed_routes' => ['^/health$'],
+    'retry_after' => 3600,
+]
+```
+
+---
+
+### RateLimitingMiddleware
+
+**Purpose:** Limits how many requests a single IP address can make within a given time window.
+
+Rate limiting protects your application from abuse, brute-force attacks, and excessive traffic. It uses the [Cache](./cache.md) component to store request counters with automatic expiration.
+
+**How it works:**
+
+1. Extracts the client's IP address from the request
+2. Looks up (or creates) a counter in the cache for that IP
+3. If the counter exceeds the limit, returns a `429 Too Many Requests` response
+4. Otherwise, lets the request through and adds rate limit headers to the response
+
+**Response headers** (added to every response):
+
+| Header | Description |
+| --- | --- |
+| `X-RateLimit-Limit` | Maximum number of requests allowed |
+| `X-RateLimit-Remaining` | Number of requests remaining in the current window |
+| `X-RateLimit-Reset` | Unix timestamp when the rate limit window resets |
+
+**When the limit is exceeded**, the response also includes:
+
+| Header | Description |
+| --- | --- |
+| `Retry-After` | Number of seconds until the client can try again |
+
+**Configuration** (`src/Config/App.php`):
+
+```php
+'rate_limiting' => [
+    'max_attempts' => (int) env('RATE_LIMIT_MAX_ATTEMPTS', 60),
+    'decay_seconds' => (int) env('RATE_LIMIT_DECAY_SECONDS', 60),
+    'key_prefix'   => env('RATE_LIMIT_KEY_PREFIX', 'rate_limit_'),
+],
+```
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `max_attempts` | `60` | Maximum requests allowed per window |
+| `decay_seconds` | `60` | Duration of each window in seconds |
+| `key_prefix` | `rate_limit_` | Prefix for cache keys (useful if you share a cache store) |
+
+**Environment variables:**
+
+```env
+RATE_LIMIT_MAX_ATTEMPTS=60
+RATE_LIMIT_DECAY_SECONDS=60
+RATE_LIMIT_KEY_PREFIX=rate_limit_
+```
+
+**Example: 429 response**
+
+```json
+{
+    "error": "Too Many Requests",
+    "message": "Rate limit exceeded. Please try again later.",
+    "retry_after": 42
+}
+```
+
+:::tip Using different limits for different routes
+The global rate limiting middleware applies a default limit to all routes. For routes that need different limits (e.g., a login endpoint with stricter limits), you can create route-level rate limiting middleware with custom configuration. See [Advanced Middleware Patterns](./middleware-advanced.mdx#ratelimiting-middleware) for details.
+:::
+
+:::info Rate limiting storage
+Rate limiting uses the [Cache](./cache.md) component. By default, it uses whatever cache driver is configured in your application (filesystem, APCu, or array). For production, consider using `apcu` for better performance since it avoids disk I/O. Set `CACHE_DRIVER=apcu` in your `.env` file.
+:::
+
+---
+
+### EncryptCookiesMiddleware
+
+**Purpose:** Encrypts all outgoing cookies and decrypts all incoming cookies.
+
+When you set a cookie in the browser, the value is stored in plain text. Anyone with access to the browser (or a malicious browser extension) can read it. This middleware encrypts cookie values before they're sent to the browser and decrypts them when they come back — ensuring that sensitive data in cookies (like session IDs, CSRF tokens, or user preferences) is protected.
+
+**How it works:**
+
+1. **Incoming request:** Reads all cookies from the request, decrypts each one (except those in the `except` list), and replaces the cookie values on the request object
+2. **Outgoing response:** Reads all `Set-Cookie` headers from the response, encrypts each cookie value, and replaces the headers
+
+The middleware uses the [Encryption](./encryption.md) component (`EncrypterInterface`) for AES-256-CBC encryption with HMAC integrity verification.
+
+**Configuration** (`src/Config/App.php`):
+
+```php
+'encrypt_cookies' => [
+    'except' => [],              // Cookie names to skip (never encrypt)
+    'prefix' => env('ENCRYPT_COOKIE_PREFIX', 'enc_'),
+],
+```
+
+| Setting | Default | Description |
+| --- | ---| --- |
+| `except` | `[]` | Array of cookie names that should NOT be encrypted |
+| `prefix` | `enc_` | Prefix added to encrypted cookie values (used to detect already-encrypted cookies) |
+
+**Environment variables:**
+
+```env
+ENCRYPT_COOKIE_PREFIX=enc_
+```
+
+:::caution Do not encrypt the session cookie name itself
+The middleware encrypts the *value* of cookies, not the cookie *name*. The session cookie name (e.g., `strux_session`) stays the same — only its value (the session ID) gets encrypted. This is safe and recommended.
+:::
+
+:::tip When to exclude cookies
+You might want to exclude cookies that are read by JavaScript or by third-party services that expect plain-text values. For example, if you have a cookie that's read by a client-side analytics script, encrypting it would break the script since it can't decrypt the value.
+:::
+
+**Example: Encrypted cookie lifecycle**
+
+```
+1. Your controller sets a cookie:
+   setcookie('user_pref', 'dark_mode')
+
+2. EncryptCookiesMiddleware encrypts the value:
+   Set-Cookie: user_pref=enc_eyJpdiI6ImFiYzEyM...
+
+3. Browser stores the encrypted value
+
+4. Browser sends the cookie back:
+   Cookie: user_pref=enc_eyJpdiI6ImFiYzEyM...
+
+5. EncryptCookiesMiddleware decrypts it:
+   $request->getCookieParams() → ['user_pref' => 'dark_mode']
+```
+
+:::info Cookie encryption and the encryption key
+Cookie encryption uses the same encryption key configured in `src/Config/App.php` under `encryption.key`. Make sure this key is set to a secure, random 32-byte string in your `.env` file. If you change the key, all previously encrypted cookies will fail to decrypt (which is the correct behavior — it prevents attackers from using old cookies). Read more in the [Encryption](./encryption.md) documentation.
+:::
+
+---
+
+### PoweredByMiddleware
+
+**Purpose:** Adds or removes the `X-Powered-By` header from responses.
+
+**Configuration:** `src/Config/Headers.php`
 
 ---
 
 ## Middleware Execution Order
 
-Middleware follows a **Last In, First Out (LIFO)** — or **onion-style** — execution model.
-
-### Request Flow (Inbound)
+### At Each Level
 
 ```
-Global Middleware
-  → Route Middleware
-    → Controller
+1. Global Middleware (runs on every request)
+2. Route Middleware (runs on the matched route)
+3. Controller Method (your business logic)
 ```
 
-### Response Flow (Outbound)
+The response then flows back in reverse:
 
 ```
-Controller
-  → Route Middleware
-    → Global Middleware
+1. Controller returns a response
+2. Route Middleware modifies the response
+3. Global Middleware modifies the response
+4. Response is sent to the browser
 ```
 
-This allows middleware to:
+### Within Global Middleware
 
-* Inspect requests **before** controllers run
-* Modify responses **after** controllers return them
+Global middleware runs in the order it was added to the stack. The default order is:
 
-Common outbound use cases include:
+```
+ErrorHandler
+  → Cors
+    → PoweredBy
+      → RequestLogger
+        → ConvertEmptyStringsToNull
+          → MethodOverride
+            → EncryptCookies
+              → RateLimiting
+                → CsrfProtection
+                  → [MaintenanceMode]
+                    → Your Controller
+```
 
-* Adding headers
-* Response compression
-* CORS headers
-* Debug instrumentation
+:::warning Don't reorder default middleware blindly
+The default order is carefully chosen. For example, `ErrorHandlerMiddleware` must be first (outermost) so it can catch exceptions from all other middleware. `CorsMiddleware` must run before `CsrfProtectionMiddleware` so browsers receive CORS headers even on failed CSRF checks. Only change the order if you understand the implications.
+:::
+
+---
+
+## Disabling Middleware
+
+You can disable specific middleware from the front controller. This is useful during development:
+
+```php
+// web/index.php
+
+if ($app->isDevelopment()) {
+    // Disable the framework's error handler (use Whoops instead)
+    $app->disableMiddleware(
+        \Strux\Component\Middleware\ErrorHandlerMiddleware::class
+    );
+
+    // Disable CSRF protection during development
+    $app->disableMiddleware(
+        \Strux\Component\Middleware\CsrfProtectionMiddleware::class
+    );
+
+    // Disable rate limiting during development
+    $app->disableMiddleware(
+        \Strux\Component\Middleware\RateLimitingMiddleware::class
+    );
+}
+```
+
+:::caution Never disable security middleware in production
+Only disable middleware during local development. Disabling CSRF protection, rate limiting, or cookie encryption in production exposes your application to serious security risks.
+:::
+
+---
+
+## Overriding Middleware
+
+You can replace a framework-provided middleware with your own custom implementation:
+
+```php
+// web/index.php
+
+$app->overrideMiddleware(
+    \Strux\Component\Middleware\PoweredByMiddleware::class,
+    new \App\Http\Middleware\MyCustomPoweredBy()
+);
+```
+
+This is useful when you want to customize the behavior of a built-in middleware without modifying the framework source code.
 
 ---
 
 ## Summary
 
-* Strux middleware is **PSR-15 compliant**
-* Middleware can be applied globally, per-route, or per-controller
-* Requests are immutable — use attributes to pass data
-* Middleware wraps controllers in an onion-like structure
+- Middleware in Strux is **PSR-15 compliant** — write once, use anywhere
+- Middleware can be applied **globally**, **per-route**, or **per-controller**
+- Requests are **immutable** — use attributes to pass data between middleware and controllers
+- Middleware follows the **onion model** — each layer wraps around the next
+- Strux ships with **10 built-in middleware** covering error handling, security, input processing, rate limiting, and cookie encryption
+- The **order** of middleware matters — always consider what runs first and last
+- You can **disable** or **override** any middleware from the front controller
 
 ---
 
-Next, explore:
+## Related Documentation
 
-* **Request Life Cycle** to see middleware in action
-* **Dependency Injection** for injecting services into middleware
-* **Routing** to understand route-level middleware placement
+- **[Advanced Middleware Patterns](./middleware-advanced.mdx)** — Before/after patterns, error handling, authentication, and more
+- **[Request Life Cycle](./lifecycle.mdx)** — See how middleware fits into the overall request flow
+- **[Dependency Injection](./dependency-injection.mdx)** — How to inject services into your middleware
+- **[Service Registries](./registries.md)** — How to register middleware in the DI container
+- **[Protecting Routes](../security/protecting-routes.md)** — Deep dive into CSRF token validation and route protection
+- **[Encryption](./encryption.md)** — How the Encrypter component works (used by EncryptCookiesMiddleware)
+- **[Caching](./cache.md)** — How the Cache component works (used by RateLimitingMiddleware)

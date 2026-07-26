@@ -1,12 +1,12 @@
 ---
 title: Advanced Middleware Patterns
 slug: /middleware/advanced
-description: Before & after middleware behavior, error handling, and authentication patterns in Strux.
+description: Before & after middleware, error handling, authentication, rate limiting, cookie encryption, and production patterns in Strux.
 ---
 
 # Advanced Middleware Patterns
 
-This document builds on the core Middleware concepts and demonstrates **real-world patterns** you will use in production applications.
+This guide covers **real-world middleware patterns** you'll use in production applications. If you're new to middleware in Strux, start with the [Middleware](./middleware.mdx) documentation first.
 
 ---
 
@@ -14,75 +14,128 @@ This document builds on the core Middleware concepts and demonstrates **real-wor
 
 Every PSR-15 middleware has **two execution phases**:
 
-1. **Before** the controller runs  
-2. **After** the controller returns a response  
+1. **Before** the controller runs — inspect or modify the request
+2. **After** the controller returns — inspect or modify the response
 
-This makes middleware ideal for **cross-cutting concerns**.
+You can use one or both phases in a single middleware. Here's how:
+
+### Before-Only Middleware
+
+This type of middleware only acts on the incoming request. It does something, then passes the request along and returns whatever response the controller produces.
+
+```php
+public function process(
+    ServerRequestInterface $request,
+    RequestHandlerInterface $handler
+): ResponseInterface {
+    // ============================================
+    // BEFORE: Do something with the request
+    // ============================================
+    $user = $this->resolveUser($request);
+    $request = $request->withAttribute('user', $user);
+
+    // Pass to the next handler and return whatever it produces
+    return $handler->handle($request);
+}
+```
+
+**Typical uses:** Authentication, authorization, input validation, request transformation.
+
+### After-Only Middleware
+
+This type of middleware lets the request pass through first, then acts on the response.
+
+```php
+public function process(
+    ServerRequestInterface $request,
+    RequestHandlerInterface $handler
+): ResponseInterface {
+    // Let the request continue to the controller
+    $response = $handler->handle($request);
+
+    // ============================================
+    // AFTER: Do something with the response
+    // ============================================
+    return $response->withHeader('X-Custom-Header', 'value');
+}
+```
+
+**Typical uses:** Logging, caching headers, response compression, CORS headers.
+
+### Before + After Middleware
+
+This type acts on both the request and the response — the most common pattern.
+
+```php
+public function process(
+    ServerRequestInterface $request,
+    RequestHandlerInterface $handler
+): ResponseInterface {
+    // BEFORE
+    $start = microtime(true);
+
+    // Pass to controller
+    $response = $handler->handle($request);
+
+    // AFTER
+    $duration = round((microtime(true) - $start) * 1000, 2);
+    return $response->withHeader('X-Response-Time', $duration . 'ms');
+}
+```
+
+**Typical uses:** Request timing, performance monitoring, audit logging.
 
 ---
 
-## Example: Timing Middleware
+## Short-Circuiting
+
+You don't always have to call `$handler->handle($request)`. If you want to **stop the pipeline** and return a response immediately, just return a response without calling the handler. The controller will never run.
 
 ```php
-namespace App\Http\Middleware;
+public function process(
+    ServerRequestInterface $request,
+    RequestHandlerInterface $handler
+): ResponseInterface {
+    $token = $request->getHeaderLine('Authorization');
 
-use Psr\Http\Message\ResponseInterface;
-use Psr\Http\Message\ServerRequestInterface;
-use Psr\Http\Server\MiddlewareInterface;
-use Psr\Http\Server\RequestHandlerInterface;
-
-class RequestTimingMiddleware implements MiddlewareInterface
-{
-    public function process(
-        ServerRequestInterface $request,
-        RequestHandlerInterface $handler
-    ): ResponseInterface {
-        // BEFORE controller
-        $start = microtime(true);
-
-        $response = $handler->handle($request);
-
-        // AFTER controller
-        $duration = microtime(true) - $start;
-
-        return $response->withHeader(
-            'X-Response-Time',
-            number_format($duration * 1000, 2) . 'ms'
-        );
+    if (empty($token)) {
+        // SHORT-CIRCUIT: Return 401 immediately
+        // The controller never runs
+        $response = new Response(401);
+        $response->getBody()->write(json_encode([
+            'error' => 'Unauthorized',
+            'message' => 'Missing Authorization header.',
+        ]));
+        return $response->withHeader('Content-Type', 'application/json');
     }
+
+    // Token exists — continue to the controller
+    return $handler->handle($request);
 }
-````
+```
 
-### Typical Use Cases
-
-**Before**
-
-* Authentication
-* Authorization
-* Input validation
-* Request transformation
-
-**After**
-
-* Logging
-* Metrics
-* Caching headers
-* Compression
-* CORS headers
+:::tip When to short-circuit
+Short-circuit when you want to reject a request early. Common scenarios:
+- User is not authenticated → return `401`
+- User lacks permission → return `403`
+- Rate limit exceeded → return `429`
+- Request is malformed → return `400`
+- Maintenance mode active → return `503`
+:::
 
 ---
 
 ## Error-Handling Middleware
 
-Error-handling middleware wraps the **entire request pipeline** and catches unhandled exceptions.
+Error-handling middleware wraps the **entire request pipeline** in a try-catch block. It catches any unhandled exception from any downstream middleware or controller.
 
-This should be registered as **global middleware** and as early as possible.
-
----
-
-### Example: Exception Handling Middleware
+This should be registered as **global middleware** and as the **first** (outermost) middleware in your stack — so it can catch exceptions from everything else.
 
 ```php
+<?php
+
+declare(strict_types=1);
+
 namespace App\Http\Middleware;
 
 use Throwable;
@@ -90,7 +143,7 @@ use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Server\MiddlewareInterface;
 use Psr\Http\Server\RequestHandlerInterface;
-use Strux\Component\Http\Response;
+use Strux\Component\Http\Psr7\Response;
 
 class ErrorHandlingMiddleware implements MiddlewareInterface
 {
@@ -99,69 +152,130 @@ class ErrorHandlingMiddleware implements MiddlewareInterface
         RequestHandlerInterface $handler
     ): ResponseInterface {
         try {
+            // Let everything else run inside this try-catch
             return $handler->handle($request);
         } catch (Throwable $e) {
-            // Log exception here if needed
+            // Log the full error for debugging
+            error_log(sprintf(
+                '[ERROR] %s in %s on line %d',
+                $e->getMessage(),
+                $e->getFile(),
+                $e->getLine()
+            ));
 
-            return new Response(
-                500,
-                ['Content-Type' => 'application/json'],
-                json_encode([
+            // Detect if the client expects JSON (e.g., API request)
+            $accept = $request->getHeaderLine('Accept');
+            $isJson = str_contains($accept, 'application/json');
+
+            if ($isJson) {
+                // Return a JSON error response
+                $response = new Response(500);
+                $response->getBody()->write(json_encode([
                     'error' => 'Internal Server Error',
                     'message' => $e->getMessage(),
-                ])
-            );
+                ], JSON_PRETTY_PRINT));
+                return $response->withHeader('Content-Type', 'application/json');
+            }
+
+            // Return an HTML error page
+            $response = new Response(500);
+            $response->getBody()->write(sprintf(
+                '<h1>500 Internal Server Error</h1><p>%s</p>',
+                htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8')
+            ));
+            return $response->withHeader('Content-Type', 'text/html');
         }
     }
 }
 ```
 
+:::warning Always catch `Throwable`, not just `Exception`
+In PHP, `Error` classes (like `TypeError`, `ValueError`) don't extend `Exception` — they both extend `Throwable`. If you only catch `Exception`, fatal errors will slip through. Always catch `Throwable` to handle everything.
+:::
+
+:::info Strux already has an ErrorHandlerMiddleware
+The framework ships with a robust `ErrorHandlerMiddleware` that supports content-negotiated error formatting (HTML, JSON, Plain Text). You only need to write your own if you want custom error handling behavior. See the [Error Handling](./error-handling.md) documentation for details.
+:::
+
 ---
 
 ## Authentication Middleware
 
-Authentication middleware verifies **who the user is**.
-
-It typically:
-
-* Reads headers / cookies / tokens
-* Resolves the user
-* Attaches the user to the request
-
----
-
-### Example: Auth Middleware
+Authentication middleware verifies **who the user is**. It reads credentials from the request (headers, cookies, session), resolves the user, and attaches them to the request.
 
 ```php
+<?php
+
+declare(strict_types=1);
+
 namespace App\Http\Middleware;
 
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Server\MiddlewareInterface;
 use Psr\Http\Server\RequestHandlerInterface;
-use Strux\Component\Http\Response;
-use App\Services\AuthService;
+use Strux\Component\Http\Psr7\Response;
+use App\Services\UserService;
 
 class AuthenticateUser implements MiddlewareInterface
 {
     public function __construct(
-        protected AuthService $auth
+        private UserService $userService
     ) {}
 
     public function process(
         ServerRequestInterface $request,
         RequestHandlerInterface $handler
     ): ResponseInterface {
-        $user = $this->auth->userFromRequest($request);
+        // Read the session cookie
+        $sessionId = $request->getCookieParams()['session_id'] ?? null;
 
-        if (!$user) {
-            return new Response(401, [], 'Unauthenticated');
+        if (!$sessionId) {
+            return $this->unauthorized('No session found. Please log in.');
         }
 
-        // Attach authenticated user to request
+        // Look up the user by session ID
+        $user = $this->userService->findBySession($sessionId);
+
+        if (!$user) {
+            return $this->unauthorized('Invalid session. Please log in again.');
+        }
+
+        // Attach the authenticated user to the request
+        // Controllers can now access it via $request->getAttribute('user')
         $request = $request->withAttribute('user', $user);
 
+        // Continue to the next middleware / controller
         return $handler->handle($request);
+    }
+
+    private function unauthorized(string $message): ResponseInterface
+    {
+        $response = new Response(401);
+        $response->getBody()->write(json_encode([
+            'error' => 'Unauthorized',
+            'message' => $message,
+        ], JSON_PRETTY_PRINT));
+        return $response->withHeader('Content-Type', 'application/json');
+    }
+}
+```
+
+### Using It on a Route
+
+```php
+use Strux\Component\Attributes\Route;
+use Strux\Component\Attributes\Middleware;
+use App\Http\Middleware\AuthenticateUser;
+
+class ProfileController
+{
+    #[Route('/profile')]
+    #[Middleware(AuthenticateUser::class)]
+    public function show()
+    {
+        // The user is guaranteed to exist here
+        $user = $request->getAttribute('user');
     }
 }
 ```
@@ -170,29 +284,32 @@ class AuthenticateUser implements MiddlewareInterface
 
 ## Role-Based Authorization Middleware
 
-Authorization answers the question:
+Authorization answers a different question than authentication:
 
-> “Is this user allowed to do this?”
+- **Authentication:** "Who are you?" → identifies the user
+- **Authorization:** "Are you allowed to do this?" → checks permissions
 
-This is usually **route-specific**.
+Authorization middleware typically depends on authentication having run first (it needs to know who the user is).
 
----
-
-### Example: Role Middleware (Reusable)
+### Creating a Role Middleware
 
 ```php
+<?php
+
+declare(strict_types=1);
+
 namespace App\Http\Middleware;
 
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Server\MiddlewareInterface;
 use Psr\Http\Server\RequestHandlerInterface;
-use Strux\Component\Http\Response;
+use Strux\Component\Http\Psr7\Response;
 
 class RequireRole implements MiddlewareInterface
 {
     public function __construct(
-        protected string $role
+        private string $role
     ) {}
 
     public function process(
@@ -202,7 +319,12 @@ class RequireRole implements MiddlewareInterface
         $user = $request->getAttribute('user');
 
         if (!$user || $user->role !== $this->role) {
-            return new Response(403, [], 'Forbidden');
+            $response = new Response(403);
+            $response->getBody()->write(json_encode([
+                'error' => 'Forbidden',
+                'message' => "This action requires the '{$this->role}' role.",
+            ], JSON_PRETTY_PRINT));
+            return $response->withHeader('Content-Type', 'application/json');
         }
 
         return $handler->handle($request);
@@ -210,9 +332,9 @@ class RequireRole implements MiddlewareInterface
 }
 ```
 
----
+### Stacking Auth Middleware
 
-### Using Role Middleware on Routes
+You can combine authentication and authorization by stacking middleware on a route:
 
 ```php
 use Strux\Component\Attributes\Route;
@@ -222,15 +344,373 @@ use App\Http\Middleware\RequireRole;
 
 class AdminController
 {
-    #[Route('/admin')]
+    #[Route('/admin/dashboard')]
     #[Middleware(AuthenticateUser::class)]
     #[Middleware(new RequireRole('admin'))]
     public function dashboard()
     {
-        // Admin-only access
+        // Both middleware run:
+        // 1. AuthenticateUser resolves the user
+        // 2. RequireRole checks if the user is an admin
+        // Only then does this method run
     }
 }
 ```
+
+:::tip Parameterized middleware
+Notice how `RequireRole` accepts a parameter (`'admin'`). This is a powerful pattern — a single middleware class can handle multiple roles: `new RequireRole('editor')`, `new RequireRole('moderator')`, etc.
+:::
+
+---
+
+## RateLimitingMiddleware
+
+The `RateLimitingMiddleware` protects your application from abuse by limiting how many requests a single IP address can make within a given time window. It's registered as **global middleware** by default and runs on every request.
+
+### How It Works (Step by Step)
+
+```
+1. User sends a request to your application
+2. Middleware extracts the user's IP address
+3. Middleware looks up a counter in the cache for that IP
+4. If the counter is below the limit:
+   → Increment the counter
+   → Add rate limit headers to the request
+   → Pass to the next middleware / controller
+5. If the counter exceeds the limit:
+   → Return a 429 Too Many Requests response
+   → The controller never runs
+```
+
+### Response Headers
+
+Every response from your application (including successful ones) includes these headers:
+
+```
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 42
+X-RateLimit-Reset: 1720720800
+```
+
+| Header | Meaning |
+| --- | --- |
+| `X-RateLimit-Limit` | The maximum number of requests allowed per window (e.g., 60) |
+| `X-RateLimit-Remaining` | How many requests the user has left in the current window (e.g., 42) |
+| `X-RateLimit-Reset` | The Unix timestamp when the window resets and the counter starts over |
+
+The client can use these headers to know when to slow down or when to retry.
+
+### When the Limit Is Exceeded
+
+If a user exceeds the limit, they receive a `429` response:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 42
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1720720800
+Content-Type: application/json
+
+{
+    "error": "Too Many Requests",
+    "message": "Rate limit exceeded. Please try again later.",
+    "retry_after": 42
+}
+```
+
+The `Retry-After` header tells the client how many seconds to wait before trying again.
+
+### Configuration
+
+All settings live in `src/Config/App.php` under the `rate_limiting` key:
+
+```php
+'rate_limiting' => [
+    'max_attempts' => (int) env('RATE_LIMIT_MAX_ATTEMPTS', 60),
+    'decay_seconds' => (int) env('RATE_LIMIT_DECAY_SECONDS', 60),
+    'key_prefix'   => env('RATE_LIMIT_KEY_PREFIX', 'rate_limit_'),
+],
+```
+
+| Setting | Default | What It Does |
+| --- | --- | --- |
+| `max_attempts` | `60` | How many requests one IP can make per window |
+| `decay_seconds` | `60` | How long each window lasts (in seconds) |
+| `key_prefix` | `rate_limit_` | Prefix for cache keys (useful when sharing a cache store with other features) |
+
+You can override these with environment variables in your `.env` file:
+
+```env
+RATE_LIMIT_MAX_ATTEMPTS=60
+RATE_LIMIT_DECAY_SECONDS=60
+RATE_LIMIT_KEY_PREFIX=rate_limit_
+```
+
+### How the Window Works (Fixed-Window Algorithm)
+
+Strux uses a **fixed-window** algorithm. Here's what that means in plain English:
+
+```
+Time is divided into fixed windows:
+Window 1: minute 0 to minute 1
+Window 2: minute 1 to minute 2
+Window 3: minute 2 to minute 3
+...
+
+Each window has its own counter.
+At the start of each new window, the counter resets to 0.
+```
+
+Example with `max_attempts=5` and `decay_seconds=60`:
+
+```
+10:00:00 - Request 1 → Counter: 1/5 ✅
+10:00:15 - Request 2 → Counter: 2/5 ✅
+10:00:30 - Request 3 → Counter: 3/5 ✅
+10:00:45 - Request 4 → Counter: 4/5 ✅
+10:00:55 - Request 5 → Counter: 5/5 ✅
+10:01:00 - Request 6 → New window! Counter: 1/5 ✅
+10:01:05 - Request 7 → Counter: 2/5 ✅
+```
+
+:::tip Why fixed-window?
+Fixed-window is simple, predictable, and easy to debug. The counter resets at predictable times, making it easy to understand why a user was rate-limited. For more advanced algorithms (sliding window, token bucket), you can create custom rate limiting middleware.
+:::
+
+### Choosing a Cache Driver
+
+Rate limiting depends on the [Cache](./cache.md) component. The cache driver determines how counters are stored:
+
+| Driver | Best For | Persistence | Performance |
+| --- | --- | --- | --- |
+| `filesystem` | Production (default) | Persists across requests | Good (disk I/O) |
+| `apcu` | High-traffic production | Persists within the PHP process | Excellent (memory) |
+| `array` | Testing only | Resets every request | N/A |
+
+For production, consider using `apcu` if your server has the APCu extension installed:
+
+```env
+CACHE_DRIVER=apcu
+```
+
+:::warning Don't use `array` in production
+The `array` cache driver stores data only for the current request. Since each request creates a new counter starting at 0, rate limiting will never actually block anyone. Always use `filesystem` or `apcu` in production.
+:::
+
+### Accessing Rate Limit Info in Controllers
+
+The middleware attaches rate limit information as **request attributes**. You can access them in your controllers:
+
+```php
+public function index(ServerRequestInterface $request)
+{
+    $maxAttempts = $request->getAttribute('rate_limit_max');
+    $remaining   = $request->getAttribute('rate_limit_remaining');
+    $resetAt     = $request->getAttribute('rate_limit_reset');
+
+    // Use this info in your response or logic
+}
+```
+
+### Disabling Rate Limiting
+
+For development, you can disable rate limiting entirely:
+
+```php
+// web/index.php
+if ($app->isDevelopment()) {
+    $app->disableMiddleware(
+        \Strux\Component\Middleware\RateLimitingMiddleware::class
+    );
+}
+```
+
+Or for specific routes, create a route-level middleware that skips rate limiting:
+
+```php
+#[Route('/api/dev/test')]
+#[Middleware(...)] // Use route-level rate limiting with higher limits
+public function devTest() { ... }
+```
+
+---
+
+## EncryptCookiesMiddleware
+
+The `EncryptCookiesMiddleware` automatically encrypts all cookie values before sending them to the browser and decrypts them when they come back. This ensures that sensitive data stored in cookies (like session IDs, user preferences, or tokens) is protected from tampering and eavesdropping.
+
+### Why Encrypt Cookies?
+
+Cookies are stored on the user's browser in **plain text** by default. This means:
+
+- Anyone with access to the browser can read them (malicious extensions, shared computers)
+- Users can modify cookie values to tamper with your application
+- Sensitive data (like session tokens) is exposed
+
+Encryption solves all three problems:
+
+- **Confidentiality:** The value is unreadable without the encryption key
+- **Integrity:** The HMAC signature detects tampering — modified cookies are rejected
+- **Opacity:** Users see gibberish instead of meaningful data
+
+### How It Works
+
+```
+Setting a cookie:
+  Your code: setcookie('pref', 'dark_mode')
+  Middleware encrypts: Set-Cookie: pref=enc_eyJpdiI6ImFiYzEyM...
+  Browser stores: pref=enc_eyJpdiI6ImFiYzEyM...
+
+Reading a cookie:
+  Browser sends: Cookie: pref=enc_eyJpdiI6ImFiYzEyM...
+  Middleware decrypts: $request->getCookieParams() → ['pref' => 'dark_mode']
+  Your code sees: 'dark_mode' (the original value)
+```
+
+The middleware uses a **prefix** (`enc_` by default) to identify which cookies are encrypted. When reading cookies, it checks for this prefix before attempting decryption.
+
+### What Gets Encrypted
+
+- **All outgoing cookies** (Set-Cookie headers on the response)
+- **All incoming cookies** (except those in the `except` list)
+
+### What Does NOT Get Encrypted
+
+- Cookie **names** are never encrypted — only the **values**
+- Cookies listed in the `except` configuration array
+- Cookies that don't have the `enc_` prefix (they're passed through as-is)
+
+### Configuration
+
+All settings live in `src/Config/App.php` under the `encrypt_cookies` key:
+
+```php
+'encrypt_cookies' => [
+    'except' => [],              // Cookie names to skip
+    'prefix' => env('ENCRYPT_COOKIE_PREFIX', 'enc_'),
+],
+```
+
+| Setting | Default | What It Does |
+| --- | --- | --- |
+| `except` | `[]` | Array of cookie names that should never be encrypted |
+| `prefix` | `enc_` | Prefix added to encrypted values (used to detect already-encrypted cookies) |
+
+You can override the prefix with an environment variable:
+
+```env
+ENCRYPT_COOKIE_PREFIX=enc_
+```
+
+### Excluding Specific Cookies
+
+Some cookies need to remain unencrypted:
+
+- Cookies read by **JavaScript** on the client side (it can't decrypt them)
+- Cookies used by **third-party services** that expect plain-text values
+- **Analytics cookies** that are sent to external services
+
+```php
+'encrypt_cookies' => [
+    'except' => [
+        'analytics_id',       // Read by JavaScript analytics
+        'third_party_token',  // Used by an external service
+        'theme_preference',   // Read by client-side theme switcher
+    ],
+    'prefix' => 'enc_',
+],
+```
+
+### Error Handling
+
+If a cookie value is **tampered with** or **invalid**, the middleware catches the decryption error and treats the cookie as if it doesn't exist:
+
+```
+Cookie: session=enc_tampered_garbage_value
+
+Middleware tries to decrypt → EncrypterException (HMAC check fails)
+Middleware logs a warning: "[EncryptCookiesMiddleware] Failed to decrypt cookie."
+Middleware sets cookie value to null
+```
+
+The application continues normally — the user is simply treated as if they don't have that cookie. This is a **fail-safe** approach: a corrupted cookie doesn't crash your application.
+
+:::info What gets logged
+When decryption fails, the middleware logs a warning with the cookie name and error message. Check your logs at `var/logs/` if you suspect cookie tampering. Read more about logging in the [Error Handling](./error-handling.md) documentation.
+:::
+
+### Encryption Key
+
+Cookie encryption uses the same encryption key configured in `src/Config/App.php` under `encryption.key`. This is the same key used by the [Encryption](./encryption.md) component.
+
+:::caution Changing the encryption key
+If you change your `ENCRYPTION_KEY`, all previously encrypted cookies will fail to decrypt. Users will be treated as if they have no cookies — they'll be logged out, lose preferences, etc. This is actually **correct behavior** from a security perspective: it invalidates all old sessions when you rotate keys. Just be aware that all users will need to re-authenticate after a key change.
+:::
+
+### Using with Other Middleware
+
+The `EncryptCookiesMiddleware` is positioned **before** `CsrfProtectionMiddleware` in the default pipeline. This is important because:
+
+1. Cookies are decrypted first
+2. Then `CsrfProtectionMiddleware` reads the decrypted CSRF cookie
+3. CSRF validation works correctly with the decrypted token
+
+If you move `EncryptCookiesMiddleware` after `CsrfProtectionMiddleware`, CSRF validation may break because the middleware would try to validate an encrypted token.
+
+---
+
+## Testing Middleware
+
+### Unit Testing a Middleware
+
+You can test middleware in isolation by creating mock objects for the request and handler:
+
+```php
+use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\ServerRequestInterface;
+use Psr\Http\Server\RequestHandlerInterface;
+use Psr\Http\Message\ResponseInterface;
+use App\Http\Middleware\RateLimitMiddleware;
+
+class RateLimitMiddlewareTest extends TestCase
+{
+    public function testAllowsRequestUnderLimit(): void
+    {
+        // Create a mock cache
+        $cache = $this->createMock(\Psr\SimpleCache\CacheInterface::class);
+        $cache->method('get')->willReturn(0); // 0 requests so far
+        $cache->method('set')->willReturn(true);
+
+        // Create the middleware
+        $middleware = new RateLimitMiddleware(
+            cache: $cache,
+            config: ['max_attempts' => 5, 'decay_seconds' => 60]
+        );
+
+        // Create a mock request
+        $request = $this->createMock(ServerRequestInterface::class);
+        $request->method('getServerParams')->willReturn(['REMOTE_ADDR' => '127.0.0.1']);
+        $request->method('withAttribute')->willReturnSelf();
+
+        // Create a mock handler
+        $handler = $this->createMock(RequestHandlerInterface::class);
+        $handler->method('handle')->willReturn(
+            $this->createMock(ResponseInterface::class)
+        );
+
+        // Run the middleware
+        $response = $middleware->process($request, $handler);
+
+        // Assert the request was allowed (handler was called)
+        $handler->expects($this->once())->method('handle');
+    }
+}
+```
+
+### Integration Testing
+
+For integration tests, you can test middleware in the context of the full request pipeline using your application's test helpers.
 
 ---
 
@@ -238,36 +718,71 @@ class AdminController
 
 ### Global Stack Order
 
-```text
-ErrorHandlingMiddleware
-→ SessionMiddleware
-→ AuthenticationMiddleware
-→ Routing
+```
+ErrorHandler          ← Must be first (outermost) to catch all errors
+  → Cors              ← Must be before auth so browsers get CORS headers on 401/403
+    → PoweredBy       ← Cosmetic, can go anywhere early
+      → RequestLogger ← Logs everything, should be early
+        → ConvertEmptyStrings → Input cleanup
+          → MethodOverride    ← Must be before routing
+            → EncryptCookies  ← Must be before CSRF (decrypts cookies)
+              → RateLimiting  ← Reject early, before expensive operations
+                → CsrfProtection ← Validates tokens after cookies are decrypted
+                  → [MaintenanceMode]
+                    → Controller
 ```
 
 ### Route-Level Order
 
-```text
-Authentication
-→ Authorization
-→ Controller
 ```
+Authentication  ← Identify the user first
+  → Authorization ← Then check what they can do
+    → Validation  ← Then validate their input
+      → Controller ← Finally, handle the business logic
+```
+
+### Common Mistakes
+
+:::danger Mistake: Putting CORS after authentication
+If CORS middleware runs after authentication, the browser won't receive CORS headers when authentication fails (401/403). The browser will block the error response, and the user will see a confusing CORS error instead of a proper "unauthorized" message.
+
+**Fix:** Always put CORS before authentication.
+:::
+
+:::danger Mistake: Putting CSRF before cookie encryption
+If CSRF middleware runs before cookie encryption, it reads the encrypted cookie value and tries to validate it as a plain-text token. The validation will always fail.
+
+**Fix:** Always put cookie encryption before CSRF protection.
+:::
+
+:::danger Mistake: Putting rate limiting after authentication
+If rate limiting runs after authentication, an attacker can exhaust your server's authentication resources (password hashing, database queries) before the rate limit kicks in.
+
+**Fix:** Always put rate limiting before authentication and CSRF.
+:::
 
 ---
 
 ## Summary
 
-* Middleware runs **before and after** controllers
-* Error-handling middleware should wrap the entire pipeline
-* Authentication identifies the user
-* Authorization enforces permissions
-* Request attributes are the preferred data-passing mechanism
-* PSR-15 enables ecosystem-wide compatibility
+- Middleware runs **before and after** controllers
+- **Short-circuit** the pipeline by returning a response without calling `$handler`
+- **Error-handling** middleware should wrap the entire pipeline (first in, last out)
+- **Authentication** identifies the user; **Authorization** checks permissions
+- **Rate limiting** protects against abuse — use it globally, and consider route-level limits for sensitive endpoints
+- **Cookie encryption** protects sensitive data in cookies — position it before CSRF validation
+- **Middleware order matters** — always think about what needs to run first
+- **Test middleware** in isolation using mock objects
 
 ---
 
-Next topics:
+## Related Documentation
 
-* **Middleware ordering & priority**
-* **Async / terminable middleware**
-* **Testing middleware in isolation**
+- **[Middleware](./middleware.mdx)** — Core middleware concepts and the built-in middleware reference
+- **[Request Life Cycle](./lifecycle.mdx)** — How middleware fits into the overall request flow
+- **[Encryption](./encryption.md)** — How the Encrypter component works (used by EncryptCookiesMiddleware)
+- **[Caching](./cache.md)** — How the Cache component works (used by RateLimitingMiddleware)
+- **[Dependency Injection](./dependency-injection.mdx)** — Injecting services into your middleware
+- **[Service Registries](./registries.md)** — Registering middleware in the DI container
+- **[Error Handling](./error-handling.md)** — The framework's error handling system
+- **[Protecting Routes](../security/protecting-routes.md)** — Authentication, authorization, and protecting routes
